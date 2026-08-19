@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musashi-gestures"
+version = "0.1.0"
+description = "Webcam hand-gesture virtual mouse for MusashiOS (MediaPipe -> uinput)"
+requires-python = ">=3.11"
+dependencies = [
+    "mediapipe>=0.10",
+    "evdev>=1.6",
+]
+
+[tool.setuptools.packages.find]
+include = ["musashi_gestures*"]
+
+[tool.setuptools.package-data]
+musashi_gestures = ["config.toml", "models/*.task"]

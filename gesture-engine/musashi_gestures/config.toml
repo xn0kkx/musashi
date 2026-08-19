@@ -1,0 +1,77 @@
+# MusashiOS gesture engine defaults.
+# System-wide override: /etc/musashi/config.toml
+
+[camera]
+device = 0          # /dev/video0
+width = 640
+height = 480
+fps = 30
+fourcc = "MJPG"     # MJPEG keeps USB bandwidth low over emulated xHCI
+
+[hands]
+min_hand_detection_confidence = 0.6
+min_hand_presence_confidence = 0.6
+min_tracking_confidence = 0.5
+
+[cursor]
+landmark = 5        # index-finger MCP: stable while pinching (tip = 8 jitters on click)
+mirror_x = true     # webcam acts as a mirror
+# Central region of the camera frame mapped to the full screen, so the hand
+# never has to reach the frame edges.
+active_region = { x0 = 0.15, y0 = 0.15, x1 = 0.85, y1 = 0.80 }
+
+[smoothing]         # One Euro filter
+min_cutoff = 1.0
+beta = 0.02
+d_cutoff = 1.0
+
+[gestures]
+# Distances are normalized by hand size (wrist -> middle-finger MCP).
+pinch_engage = 0.40     # below this: pinch pressed
+pinch_release = 0.55    # above this: pinch released (hysteresis)
+engage_frames = 3       # frames a state must persist before switching
+thumb_out = 0.6         # thumb-to-index-MCP distance (open palm posture) — a relaxed
+                        # (not actively abducted) open hand measures ~0.6-0.8; 0.9
+                        # demanded an abduction the user has no reason to know about
+swipe_velocity = 2.0    # hand-scales/second of wrist travel to trigger a swipe —
+                        # deliberately unchanged, see swipe_min_travel below
+swipe_cooldown = 0.8    # seconds between swipes
+long_press_hold = 0.7   # seconds the secondary touch is held down
+long_press_cooldown = 1.0  # seconds between long-presses
+
+# Open-palm posture tolerance and swipe motion detection. See docs/GESTURES.md.
+palm_extend_ratio = 1.05  # finger tip-vs-PIP distance ratio to count as "extended"
+                           # (was hardcoded at 1.1 — curled fingers score ~0.75, so
+                           # this only needs to beat landmark noise)
+palm_min_fingers = 3      # of the 4 fingers, how many must be extended (index and
+                           # middle are always mandatory — see _open_palm) — tolerates
+                           # one of the less reliable ring/pinky tips dropping out
+palm_grace_frames = 3     # keep a swipe "armed" for this many frames after the palm
+                           # posture is lost (~200ms @ 15fps) — covers a full posture
+                           # dropout during the fastest part of a flick
+swipe_arm_frames = 2      # consecutive palm-posture frames needed to arm a swipe
+                           # (~130ms) — the counterweight to the loosened palm gates
+swipe_window = 0.30       # seconds of wrist-motion history considered per swipe check
+swipe_min_window = 0.06   # minimum dt (seconds) between two samples compared for
+                           # velocity — floors the fastest-sub-window scan so it can't
+                           # divide near-zero dt and report phantom velocity
+swipe_min_travel = 0.8    # hand-scales of wrist displacement required — this is what
+                           # makes it safe to leave swipe_velocity unchanged
+swipe_axis_ratio = 1.2    # was hardcoded at 1.5 — the higher value effectively
+                           # demanded ~2x real dominance for horizontal swipes because
+                           # normalized y is ~1.33x normalized x per pixel of motion
+                           # (camera is 640x480); see gestures.py's aspect correction
+
+[touch]
+tap_dwell = 0.06         # seconds a tap contact stays down
+swipe_steps = 24         # interpolation steps for a synthesized edge swipe
+swipe_step_dt = 0.006    # seconds between swipe steps (~150ms swipe total)
+swipe_down_dwell = 0.02  # seconds to hold the initial contact before moving it
+
+[overlay]
+# camera preview + hand skeleton window. Uses cv2.imshow (Qt/xcb), which
+# needs Xwayland — Phosh is pure Wayland (no Xwayland), so this is off by
+# default. A Qt platform-plugin failure aborts the whole process (not a
+# catchable cv2.error), so don't enable this without Xwayland installed.
+enabled = false
+scale = 0.5

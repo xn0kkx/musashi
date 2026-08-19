@@ -1,0 +1,10 @@
+# No keyboard on this system — gestures can't type a PIN/password, so the
+# lock screen must never require credentials to swipe past.
+[sm/puri/phosh/lockscreen]
+require-unlock=false
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true

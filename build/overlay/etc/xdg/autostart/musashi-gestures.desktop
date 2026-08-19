@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=MusashiOS Gesture Engine
+Exec=/opt/gesture-engine/venv/bin/python -m musashi_gestures --no-overlay
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

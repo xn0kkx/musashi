@@ -1,0 +1,28 @@
+# Generated build artifacts — regenerate with build/build-image.sh
+out/
+
+# Local logs (boot/build history, gesture-engine runtime logs). Not part of
+# the source tree, and the boot/build logs can contain host-specific paths.
+logs/
+*.log
+
+# Claude Code project state — local to this machine, not shipped code.
+.claude/
+
+# Python (note: does NOT match the top-level build/ source dir — patterns
+# below are anchored under gesture-engine/ specifically)
+__pycache__/
+*.py[cod]
+gesture-engine/**/*.egg-info/
+gesture-engine/build/
+gesture-engine/dist/
+.venv/
+venv/
+
+# NBD mount scratch dir used by build/update-gesture-engine.sh
+out/mnt-nbd/
+out/mnt/
+
+# Editor/OS cruft
+.DS_Store
+*.swp

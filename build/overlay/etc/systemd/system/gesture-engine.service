@@ -1,0 +1,15 @@
+# Optional headless mode (no preview overlay). The default session starts the
+# engine via Phosh's XDG autostart entry instead, so this unit ships disabled.
+#   systemctl enable --now gesture-engine
+[Unit]
+Description=MusashiOS gesture engine (headless)
+After=multi-user.target
+
+[Service]
+User=musashi
+ExecStart=/opt/gesture-engine/venv/bin/python -m musashi_gestures --no-overlay
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
