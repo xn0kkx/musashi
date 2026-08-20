@@ -60,3 +60,45 @@ enabled = true
 # to download it; nothing is fetched automatically.
 model = ""
 locale = "pt"
+
+[wake]
+# Only `python -m musashi_voice --wake` (what musashi-voice.service runs)
+# reads this section — the PTT default mode ignores it entirely. [vad] above
+# is a different thing: it trims silence off a PTT recording after a human
+# already decided the turn boundary; this section decides the turn boundary
+# itself, with no human involved.
+word = "musashi"
+# rapidfuzz.fuzz.ratio(candidate, word), 0-100. 75 sits in the gap between
+# the worst phonetic hit measured ("musaxi", 76.9) and the closest false
+# friend measured ("mustache", 66.7) — see wakeword.py's docstring for the
+# full corpus and why this is fuzz.ratio rather than the WRatio grammar.py
+# uses for the command grammar.
+threshold = 75.0
+# Silero's per-block P(speech), 0-1. Same scale and same default as
+# [vad].threshold above, but a separate knob: tightening the PTT trim must
+# never accidentally tighten (or loosen) when the always-on loop opens an
+# utterance, and vice versa.
+vad_threshold = 0.5
+# Continuous silence, in ms, that closes an utterance and hands it to
+# Whisper. 700 is a middle point: much below ~600 cuts off a person who
+# pauses mid-sentence ("musashi... abrir o terminal"); much above ~800 the
+# extra wait is audible in every single interaction's WALL latency (see
+# latency.py) for no benefit. This number is the biggest single knob on
+# perceived responsiveness in --wake mode.
+silence_ms = 700
+# An utterance with less estimated speech than this, in ms, is dropped
+# before it ever reaches Whisper — a door latch or a cough is not worth a
+# CPU-bound transcription.
+min_speech_ms = 250
+# Audio kept from BEFORE the VAD crosses vad_threshold, in ms. Not optional:
+# Silero's probability lags the true start of speech by a block or two, and
+# for a short word like "musashi" that lag is exactly the "mu" — without a
+# pre-roll the wake word would routinely fail to match its own first
+# syllable.
+preroll_ms = 300
+# After every spoken reply, how long (ms) of audio to discard before
+# listening again. This is what stops the loop from hearing its own TTS
+# confirmation and treating it as a new utterance. It is a mitigation, not a
+# fix: true barge-in and acoustic echo cancellation are out of scope here
+# and belong to the Plano Diretor's S3 streaming work.
+resume_delay_ms = 250

@@ -49,3 +49,19 @@ language = "pt"
 # capable from first boot.
 model = "/opt/musashi/piper/pt_BR-faber-medium.onnx"
 locale = "pt"
+
+[wake]
+# musashi-voice.service runs `--wake` here, unlike a host checkout where the
+# default is still PTT — these are the values that govern the machine that
+# listens 24/7, so they are pinned here rather than left to the packaged
+# defaults an operator might not think to look at. Same defaults as the
+# packaged voice.toml for now (see there for the reasoning behind each);
+# repeated explicitly so a future change to one does not silently change the
+# other.
+word = "musashi"
+threshold = 75.0
+vad_threshold = 0.5
+silence_ms = 700
+min_speech_ms = 250
+preroll_ms = 300
+resume_delay_ms = 250

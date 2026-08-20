@@ -19,9 +19,11 @@ milestone log). This repo started as a gesture-controlled OS prototype (old
 name: `HaikuOS`); on 2026-08-19 the project's target was redefined into the
 mainframe described above, and the `haiku*` → `musashi*` rename was
 completed and validated. The voice MVP is a proof of concept, not the
-Plano Diretor's S3–S6 voice loop: push-to-talk is a terminal keypress (no
-gesture trigger yet), there's no wake word, no AEC, no streaming, and no web
-surface. The core/inference-node/surface split, the privacy classifier, and
+Plano Diretor's S3–S6 voice loop: `musashi-voice.service` now runs always-on,
+woken by the word "musashi" spotted via `faster-whisper` (no dedicated
+wake-word model, no gesture trigger, no AEC, no streaming, no web surface) —
+see [Voice](#voice) for the security trade-off this accepted. The
+core/inference-node/surface split, the privacy classifier, and
 the multi-LLM router (§0–§2 of the pivot) haven't started — what's here today
 is the pre-pivot base plus a voice proof of concept, both feeding into
 `musashi-core`'s foundation.
@@ -130,9 +132,10 @@ code-iteration cycle can never silently widen or reset it.
 
 `musashi-effector.service` ships **enabled** (it needs no webcam and no
 preview window); `gesture-engine.service` does not. `musashi-voice.service`
-ships **disabled** — see [Voice](#voice) for why an automatic activation
-would be a security regression, not a convenience, until a real push-to-talk
-trigger exists.
+now ships **enabled** too, running always-on with wake-word activation — see
+[Voice](#voice) for the security trade-off that accepts: without a real
+second, non-audio factor, any audio near the microphone (including a
+recording) can dispatch a command.
 
 ## Build
 
@@ -205,31 +208,69 @@ semantics. Fine-tuning lives in `/etc/musashi/config.toml` inside the guest
 A working proof of concept, not the Plano Diretor's production voice loop —
 see [Status](#status) for what's missing. `run.sh` passes the host's
 microphone and speaker into the guest as an `intel-hda` card
-(`-audiodev pipewire` + `hda-duplex`; disable with `--no-audio`). Inside the
-guest, `musashi-voice` runs push-to-talk over a terminal (Enter to record,
-Enter to stop — no gesture trigger exists yet, deliberately: see the "why
-not a fake activation" note in `musashi-voice.service`), transcribes with
-`faster-whisper` (`small`, CPU, baked into the image at
-`/opt/musashi/whisper/small`), resolves the transcript against a fuzzy-match
-grammar built at runtime from the effector's own `sys.tools` table (so a new
-allowlisted app is voice-addressable with no code change), sends the intent
-to `musashi-effector` over the local unix socket, and speaks the result back
-with Piper (`pt_BR-faber-medium`, baked in at `/opt/musashi/piper/`):
+(`-audiodev pipewire` + `hda-duplex`; disable with `--no-audio`).
+
+`musashi-voice.service` now runs **always-on inside the guest**, started
+with the VM: capture never stops, Silero VAD segments speech by silence, and
+each segment is transcribed with `faster-whisper` (`small`, CPU, baked into
+the image at `/opt/musashi/whisper/small`) unconditionally. What used to
+gate every transcription — a held button — is now a wake-word check: only a
+transcript that *starts* with something phonetically close to "musashi" (a
+fuzzy match against the word itself, `voice/musashi_voice/wakeword.py` —
+there is no dedicated wake-word ML model, see the module docstring for why)
+is resolved against the fuzzy-match command grammar built at runtime from
+the effector's own `sys.tools` table (so a new allowlisted app is
+voice-addressable with no code change), dispatched to `musashi-effector`
+over the local unix socket, and answered with Piper
+(`pt_BR-faber-medium`, baked in at `/opt/musashi/piper/`). Anything that
+doesn't start with the wake word is discarded silently — logged at DEBUG,
+nothing spoken back.
+
+**This is a deliberate, accepted security trade-off, not an oversight.**
+Voice input has no built-in authentication: Plano Diretor §2.7 calls for a
+second, non-audio factor on `EFFECT` actions specifically because any sound
+near the microphone — a person, a TV, a recording played back — can
+otherwise trigger a real action. The previous design used push-to-talk (a
+held button) as that second factor, and shipped `musashi-voice.service`
+**disabled** rather than fake an always-on trigger. This change replaces
+that button with the wake word above, at the cost of the §2.7 property: an
+audio source that knows to say "musashi" can now dispatch a command with
+nothing held down. See `build/overlay/etc/systemd/system/musashi-voice.service`
+for the full trade-off writeup and what would close the gap (a confirmation
+gate on destructive `EFFECT` tools — not implemented). The push-to-talk
+harness is still there for manual, deliberate use, unchanged and still the
+CLI default with no flags:
 
 ```sh
 ssh -p 2222 musashi@localhost
-/opt/gesture-engine/venv/bin/python -m musashi_voice -v
+/opt/gesture-engine/venv/bin/python -m musashi_voice -v          # PTT, manual
+/opt/gesture-engine/venv/bin/python -m musashi_voice --wake -v   # what the service runs
 ```
 
-Validated end-to-end on real hardware (2026-08-19): "abrir a calculadora" /
-"fechar a calculadora" launched and closed `gnome-calculator` inside the
-guest for real, with a spoken Portuguese confirmation played back through
-the host's speakers. Steady-state intent dispatch over the unix socket:
-~50ms. `musashi_voice` also runs on a host (unchanged from the original
-design) talking to the guest over `vsock` instead — see
+Validated end-to-end on real hardware (2026-08-19, PTT MVP): "abrir a
+calculadora" / "fechar a calculadora" launched and closed `gnome-calculator`
+inside the guest for real, with a spoken Portuguese confirmation played back
+through the host's speakers. Steady-state intent dispatch over the unix
+socket: ~50ms. `musashi_voice` also runs on a host (unchanged from the
+original design) talking to the guest over `vsock` instead — see
 [voice/README.md](voice/README.md) for both arrangements, model config, and
-the `--text`/`--list-tools`/`--devices` flags useful for testing without a
-microphone.
+the `--text`/`--list-tools`/`--devices`/`--wake` flags useful for testing.
+
+`--wake` was validated the next day (2026-08-20) against a real cold boot of
+the rebuilt image, not just a foreground run: `musashi-voice.service` starts
+itself, connects to `musashi-effector`, loads Whisper, and reaches "ready
+(wake word 'musashi')" with no manual step. Getting there surfaced two real
+bugs neither the unit suite nor a foreground `python -m musashi_voice --wake`
+run had caught — a CUDA-linked `torchaudio` wheel breaking the VAD on this
+GPU-less guest, and a systemd ordering cycle that silently dropped the
+unit's boot-time start job — both fixed; see
+[ROADMAP.md](ROADMAP.md#done--always-on-wake-word-service-enabled-2026-08-20)
+for the root causes. End-to-end dispatch was then re-validated with
+Piper-synthesized speech fed through the real STT → wake → grammar →
+effector chain: "musashi, abrir o terminal" opened `foot` inside the guest
+for real, and speech without the wake word ("abrir o terminal" on its own)
+was correctly discarded with no dispatch. Live validation with an actual
+human voice near the host microphone is still outstanding.
 
 ## Layout
 

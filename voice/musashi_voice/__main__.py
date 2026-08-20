@@ -1,19 +1,30 @@
-"""musashi-voice: the host-side voice loop, plus its push-to-talk test harness.
+"""musashi-voice: the host-side voice loop, its PTT test harness, and the
+always-on wake-word loop the systemd unit runs.
 
     python -m musashi_voice                          # PTT loop against the VM
+    python -m musashi_voice --wake                    # always-on, "musashi" wakes it
     python -m musashi_voice --unix /tmp/eff.sock     # ... against a host effector
     python -m musashi_voice --text "abrir terminal"  # no mic, no GPU, one shot
     python -m musashi_voice --list-tools             # what the guest exposes
 
-**Push-to-talk harness.** Enter starts recording, Enter stops it. A held key
-(pynput/keyboard) was rejected for V1: both need an X/Wayland grab or root to
-see key-up reliably, and this harness is scaffolding — the real PTT is the
-guest's hand gesture, which will drive the very same `threading.Event` that
-the second Enter sets here. Trading a dependency and a permissions problem for
-a harness that gets deleted is a bad trade.
+**Push-to-talk harness (default mode, unchanged).** Enter starts recording,
+Enter stops it. A held key (pynput/keyboard) was rejected for V1: both need an
+X/Wayland grab or root to see key-up reliably, and this harness is scaffolding.
+It remains the default because it is still what a human at a terminal wants
+for manual testing — `--wake` does not replace it, it adds a second mode.
+
+**`--wake` (always-on).** `musashi-voice.service` has no console to press
+Enter at, so V2 replaces the human's second Enter with a wake word: capture
+never stops (see audio.listen()), and only an utterance whose transcript
+starts with something close to "musashi" (wakeword.strip_wake_word()) is
+acted on. This is the trade-off explained at length in the systemd unit: it
+trades away PTT's "second, non-audio factor" property (Plano Diretor §2.7)
+for the ability to run headless. Deliberate, not an oversight.
 
 Everything after "the user stopped talking" is timed per stage, which the plan
-requires from day one (Plano Diretor §8/S4: p50 <= 900 ms).
+requires from day one (Plano Diretor §8/S4: p50 <= 900 ms). In --wake mode
+"stopped talking" is the VAD's silence boundary rather than a keypress, so
+`[wake].silence_ms` is baked into every WALL measurement — see voice/README.md.
 """
 from __future__ import annotations
 
@@ -21,6 +32,7 @@ import argparse
 import logging
 import sys
 import threading
+import time
 
 from .config import expand_path, load_config
 from .grammar import MIN_SCORE, Grammar
@@ -28,6 +40,8 @@ from .intent import resolve_intent
 from .latency import LatencyTrace
 from .tts import Speaker, confirmation_text
 from .vsock import EffectorClient
+from .wakeword import DEFAULT_THRESHOLD as WAKE_DEFAULT_THRESHOLD
+from .wakeword import DEFAULT_WAKE_WORD, strip_wake_word
 
 log = logging.getLogger("musashi-voice")
 
@@ -49,6 +63,9 @@ class VoiceLoop:
         self.fallback = fallback
         self.min_score = float(cfg.get("intent", {}).get("min_score", MIN_SCORE))
         self.locale = str(cfg.get("tts", {}).get("locale", "pt"))
+        wake_cfg = cfg.get("wake", {})
+        self.wake_word = str(wake_cfg.get("word", DEFAULT_WAKE_WORD))
+        self.wake_threshold = float(wake_cfg.get("threshold", WAKE_DEFAULT_THRESHOLD))
 
     # -- the half of the pipeline that needs no hardware -------------------
     def handle_transcript(self, transcript: str, trace: LatencyTrace) -> None:
@@ -88,6 +105,37 @@ class VoiceLoop:
                 self.speaker.say(confirmation_text(None, locale=self.locale))
             return
         self.handle_transcript(transcript.text, trace)
+
+    # -- the always-on pipeline ---------------------------------------------
+    def handle_wake_audio(self, pcm, trace: LatencyTrace) -> bool:
+        """One utterance from `audio.listen()` in; True if it became a real
+        interaction (worth printing a latency summary for), False if it was
+        silently discarded for lacking the wake word.
+
+        No `trim_silence()` here: `audio.listen()`'s VadSegmenter already
+        delivered a silence-delimited utterance, and re-running the endpoint
+        VAD would only add latency to the S4 budget for no benefit."""
+        with trace.stage("stt"):
+            transcript = self.transcriber.transcribe(pcm)
+        print(f"  heard : {transcript.text!r} [{transcript.language}]")
+
+        with trace.stage("wake"):
+            command = strip_wake_word(transcript.text, self.wake_word, self.wake_threshold)
+        if command is None:
+            log.debug("no wake word in %r; discarding", transcript.text)
+            return False
+
+        if not command:
+            # The wake word alone, no command after it: the person addressed
+            # this machine and got nothing back, which is worse than staying
+            # silent -- say so, the same way an unresolved MISS does.
+            with trace.stage("tts"):
+                self.speaker.say(confirmation_text(None, locale=self.locale))
+            print("  reply : (wake word only, no command)")
+            return True
+
+        self.handle_transcript(command, trace)
+        return True
 
     def record_once(self):
         """Enter -> record -> Enter. Returns float32 PCM (possibly empty)."""
@@ -150,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the guest's live tool table and the grammar built from it")
     parser.add_argument("--no-tts", action="store_true", help="print replies instead of speaking")
     parser.add_argument("--devices", action="store_true", help="list audio devices and exit")
+    parser.add_argument("--wake", action="store_true",
+                        help="always-on capture, activated by the wake word "
+                             "instead of push-to-talk (what musashi-voice.service runs)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -168,7 +219,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # The grammar is derived from the guest's live table, never hardcoded: a
     # tool added to the effector is speakable after a restart of this process.
+    #
+    # --wake only: retry a few times before giving up. Requires=musashi-effector
+    # in the unit only orders the two units' *starts*; it does not wait for the
+    # socket to actually be listening, so on a fresh boot this process can win
+    # the race and ask before the effector has bound /run/musashi/effector.sock.
     tools = client.tools()
+    if not tools and args.wake:
+        for attempt in range(1, 5):
+            log.warning("effector not answering yet (attempt %d/5); retrying in 2s", attempt)
+            time.sleep(2.0)
+            tools = client.tools()
+            if tools:
+                break
     if not tools:
         print("could not read the tool table from the effector.\n"
               "  - is the VM running (./run.sh) and musashi-effector up?\n"
@@ -203,6 +266,9 @@ def main(argv: list[str] | None = None) -> int:
     print("loading the Whisper model (first run downloads it)...")
     loop.transcriber.load()
 
+    if args.wake:
+        return _run_wake_loop(loop, cfg, client)
+
     print(f"ready. tools: {grammar.tools()}   Ctrl-C to quit.")
     try:
         while True:
@@ -213,6 +279,33 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             loop.handle_audio(pcm, trace)
             print(trace.format_summary())
+    except KeyboardInterrupt:
+        print()
+    finally:
+        client.close()
+    return 0
+
+
+def _run_wake_loop(loop: VoiceLoop, cfg: dict, client: EffectorClient) -> int:
+    """Always-on: audio.listen() segments speech by silence forever; each
+    utterance is checked for the wake word and only acted on if it starts
+    with one. See __main__'s module docstring for the security trade-off."""
+    from . import audio
+
+    print(f"ready (wake word {loop.wake_word!r}). tools: {loop.grammar.tools()}   "
+          "Ctrl-C to quit.")
+    try:
+        for pcm in audio.listen(cfg.get("audio"), cfg.get("wake")):
+            trace = LatencyTrace(label="utterance")   # clock starts at end of speech
+            became_interaction = loop.handle_wake_audio(pcm, trace)
+            if became_interaction:
+                print(trace.format_summary())
+    except audio.AudioUnavailable as exc:
+        print(f"audio capture unavailable: {exc}\n"
+              "  - did the VM boot with ./run.sh (not --no-audio)?\n"
+              "  - is silero-vad installed (pip install 'voice/[audio]')?",
+              file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print()
     finally:

@@ -110,6 +110,9 @@ The knobs that matter:
 | `stt.language` | `pt` | `pt` | `pt` \| `en` \| `auto` |
 | `intent.min_score` | `75.0` | — | below this a transcript is a MISS |
 | `tts.model` | *(empty)* | `/opt/musashi/piper/pt_BR-faber-medium.onnx` | path to the Piper `.onnx` |
+| `wake.word` | `musashi` | same | `--wake` mode only; ignored by PTT |
+| `wake.threshold` | `75.0` | same | fuzz.ratio cutoff, see `wakeword.py` |
+| `wake.silence_ms` | `700` | same | biggest single knob on `--wake` latency |
 
 `--cid`/`--port` on the command line force vsock even when `unix_path` is set,
 so a guest shell can still be pointed at some other VM if that is ever useful.
@@ -131,16 +134,27 @@ arecord -d 3 -f S16_LE -r 16000 /tmp/t.wav && aplay /tmp/t.wav
 /opt/gesture-engine/venv/bin/python -m musashi_voice
 ```
 
-That is a foreground process on purpose. `musashi-voice.service` exists in the
-image but ships **disabled**: this loop is push-to-talk, its trigger today is a
-terminal key, and the real trigger — a hand gesture — does not exist yet. The
-unit file explains the choice at length; the short version is that enabling it
-would require inventing an always-on activation that discards the security
-property PTT exists to provide.
+That runs the PTT harness in the foreground, for manual testing. In the
+image itself, `musashi-voice.service` runs this package a different way —
+`--wake`, always-on, started with the VM:
+
+```bash
+systemctl status musashi-voice
+journalctl -fu musashi-voice
+```
+
+**This is not the same activation as PTT, and the difference matters.** The
+unit used to ship disabled because an automatic activation discards the
+security property push-to-talk exists to provide (Plano Diretor §2.7 — see
+"Push-to-talk" below); it now ships **enabled**, running `--wake` instead,
+because that trade-off was explicitly accepted rather than avoided. The unit
+file has the full writeup. The PTT harness above still works exactly as
+before and is the way to test manually without accepting that trade-off.
 
 Useful there too:
 
 ```bash
+/opt/gesture-engine/venv/bin/python -m musashi_voice --wake         # what the service runs
 /opt/gesture-engine/venv/bin/python -m musashi_voice --list-tools
 /opt/gesture-engine/venv/bin/python -m musashi_voice --text "abrir o terminal"
 /opt/gesture-engine/venv/bin/python -m musashi_voice --devices
@@ -166,15 +180,36 @@ python -m musashi_voice --devices     # pick an input device
 python -m musashi_voice --no-tts -v   # print replies, debug logging
 ```
 
-**Push-to-talk**: press Enter to start recording, Enter again to stop. This is
-a harness, not the product — the real PTT is a hand gesture in the guest, and
-when it lands it will set the very same `threading.Event` that the second Enter
-sets today. There is no wake word by design: PTT is the second non-audio factor
-Plano Diretor §2.7 requires, and it neutralises the speaker-replay attack class
-by construction.
+**Push-to-talk** (default mode, no flags): press Enter to start recording,
+Enter again to stop. Originally a stand-in for a hand-gesture PTT that never
+got built; it remains here, unchanged, as the manual/testing mode — every
+flag and behavior described in this README for the no-`--wake` case still
+applies exactly as before. It is the second, non-audio factor Plano Diretor
+§2.7 asks for on `EFFECT` actions, and it neutralises the speaker-replay
+attack class by construction: nothing is heard unless a human is holding the
+key down for it.
+
+**`--wake`** (what `musashi-voice.service` runs): no key, no gesture,
+listening continuously. `musashi_voice/audio.py`'s `listen()` uses Silero VAD
+to segment speech by silence automatically instead of waiting for `stop` to
+be set, and every segment is transcribed unconditionally. What used to be
+the PTT gate is now `musashi_voice/wakeword.py`'s `strip_wake_word()`: a
+transcript is only acted on if it *starts* with something a fuzzy match
+(`rapidfuzz.fuzz.ratio`, default threshold 75.0 — see that module's
+docstring for the measured corpus behind the number) accepts as close enough
+to "musashi". No dedicated wake-word model is used or trained — pretrained
+openWakeWord models are English-only, and a PT-BR model needs a GPU training
+pipeline out of scope here; reusing the STT that already runs was the
+available alternative. **Accept that this drops the §2.7 property above**:
+without a human holding a key, any audio able to say "musashi" near the
+microphone can dispatch a command, including a recording. The `[wake]`
+section of `voice.toml` tunes this mode (`word`, `threshold`, `silence_ms`,
+`vad_threshold`, `preroll_ms`, `min_speech_ms`, `resume_delay_ms`) and does
+not affect PTT mode at all.
 
 Every interaction prints its latency by stage, clocked from the moment you stop
-talking:
+talking (PTT) or from the moment the VAD closes the utterance (`--wake`, where
+`[wake].silence_ms` is therefore part of every WALL number below):
 
 ```
 [utterance] latency by stage:
@@ -186,6 +221,10 @@ talking:
   MEASURED    414.4 ms  (budget 900 ms)
   WALL        415.9 ms
 ```
+
+(`--wake` mode replaces the `vad` stage above with a `wake` stage — the
+`strip_wake_word()` check — since the VAD's work already happened inside
+`audio.listen()`, before the utterance ever reached `handle_wake_audio()`.)
 
 ## What it understands
 
@@ -223,6 +262,8 @@ No hardware, no VM, no torch:
 python3 voice/tests/test_vsock_protocol.py
 python3 voice/tests/test_grammar_match.py
 python3 voice/tests/test_resolve_intent.py
+python3 voice/tests/test_wake_word.py
+python3 voice/tests/test_vad_segmenter.py
 ```
 
 ## Troubleshooting

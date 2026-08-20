@@ -1,46 +1,86 @@
-# MusashiOS voice loop — SHIPPED DISABLED, ON PURPOSE. Do not `systemctl
-# enable` this yet; read why first.
+# MusashiOS voice loop — ALWAYS-ON WAKE WORD, SHIPPED ENABLED. Read the
+# trade-off below before touching this file; it was accepted deliberately,
+# not overlooked.
 #
-# musashi-voice is a *push-to-talk* loop: it records for exactly as long as
-# something external says to. Today that something is a terminal key — Enter to
-# start, Enter to stop (musashi_voice/__main__.py:record_once). That is a
-# harness for a human at a console, and it is meaningless under systemd, which
-# has no console to press Enter at.
+# Until this change, musashi-voice was *push-to-talk*: it recorded for
+# exactly as long as something external said to, and that something was a
+# terminal key — Enter to start, Enter to stop
+# (musashi_voice/__main__.py:record_once). That is a harness for a human at
+# a console, and it is meaningless under systemd, which has no console to
+# press Enter at — which is exactly why this unit shipped disabled for as
+# long as PTT was the only activation this package knew how to do.
 #
-# The real trigger is a hand gesture in the guest, which will set the very same
-# threading.Event that the second Enter sets today. That gesture does not exist:
-# it needs a new transition in GestureStateMachine and it was explicitly out of
-# scope for the change that moved voice into this VM.
+# PTT existed for a specific reason, not just as a stopgap: Plano Diretor
+# §2.7 asks that `EFFECT`-class actions get a second, *non-audio* factor,
+# because voice input is unauthenticated — any sound in the room, including
+# a command replayed from a speaker, can otherwise trigger a real action.
+# Holding a button (or, eventually, a hand gesture) is that second factor,
+# and it makes the whole DolphinAttack / speaker-replay class of attack
+# impossible by construction: no button held, no action taken, full stop.
 #
-# So there are two honest options and one dishonest one. The dishonest one is
-# enabling this unit with some invented always-on activation — a wake word we
-# rejected, or an open microphone — which would have to be deleted the moment
-# the real PTT lands, and which would quietly discard the security property PTT
-# exists to provide (Plano Diretor §2.7: a second, non-audio factor; it is what
-# makes the speaker-replay attack class impossible by construction).
+# This unit now runs `python -m musashi_voice --wake` instead: capture never
+# stops, and a transcript is only acted on if it starts with something
+# phonetically close to the wake word "musashi" (see
+# musashi_voice/wakeword.py). That is a deliberately accepted regression of
+# the §2.7 property, not a rediscovery that PTT was unnecessary — a person's
+# voice, or ANY audio source able to say "musashi, fechar o terminal" near
+# this machine's microphone, can now dispatch an `EFFECT` tool with no
+# second factor at all. The user asked for this trade explicitly, aware of
+# the cost, in exchange for a service that starts with the VM instead of
+# requiring an SSH session every time.
 #
-# The honest options are: run it in the foreground from an SSH session, which
-# is what you should do today —
+# What still stands between a heard phrase and a real action: the grammar's
+# fuzzy-match threshold (a MISS still says nothing), and the effector's own
+# Registry — allowlisted apps only, EFFECT tools only, no free-form strings
+# ever reach Gio. What does NOT exist yet, and is the honest next step for
+# closing this gap rather than just noting it: a confirmation gate on
+# destructive EFFECT tools (chiefly app.close) that requires a real second
+# factor again — the PTT harness in this same package (`__main__.py`,
+# default mode, no `--wake`) still works today for exactly that kind of
+# manual, deliberate use, and remains here on purpose, not as dead code.
+#
+# The old push-to-talk foreground session is still how to run this loop
+# without accepting the trade-off above:
 #
 #     ssh -p 2222 musashi@localhost
 #     /opt/gesture-engine/venv/bin/python -m musashi_voice
 #
-# — or, once the PTT gesture exists, enable this unit, because then the gesture
-# engine drives the record window over the effector and the process genuinely
-# has no reason to be attached to a terminal.
-#
-# When that day comes, the only change needed here should be dropping this
-# comment. The unit below is otherwise correct and ready.
-#
-#     systemctl enable --now musashi-voice
-#
 [Unit]
-Description=MusashiOS voice loop (STT -> intent -> effector -> TTS)
+Description=MusashiOS voice loop (always-on wake word: STT -> intent -> effector -> TTS)
 # It speaks to the effector over /run/musashi/effector.sock, which that unit's
 # RuntimeDirectory= creates. Requires=, not just After=: with no socket there
 # is no capability layer to propose intents to, and the loop is pointless.
+# Note that Requires=/After= only order the two units' *starts*; they do not
+# wait for the socket to actually be listening, so __main__.py's --wake path
+# retries the first tool-table read a few times before giving up — see there.
 After=musashi-effector.service
 Requires=musashi-effector.service
+# Audio capture is a configuration precondition, not a transient fault: a VM
+# booted with `./run.sh --no-audio` has no intel-hda card and never will
+# until it is rebooted differently, so retrying forever would just spin.
+# After StartLimitBurst failures inside StartLimitIntervalSec this unit goes
+# to `failed` and stays there — visible in `systemctl status musashi-voice`
+# — instead of looping quietly in the journal.
+StartLimitIntervalSec=120
+StartLimitBurst=3
+# musashi-effector.service is explicitly After=multi-user.target (it needs
+# the Phosh Wayland/D-Bus session, which is only up by then). A normal
+# service's default dependencies add an *implicit* Before=multi-user.target
+# (from WantedBy=multi-user.target below) — combine that with this unit's
+# own After=musashi-effector.service and the two units' start jobs form a
+# genuine cycle: voice Before multi-user.target, multi-user.target Before
+# effector (transitively, since effector waits for it), effector Before
+# voice (mirrored from voice's own After=). systemd resolves any real cycle
+# by silently deleting one job from the graph, and in testing it always
+# deleted musashi-voice.service's start job — the unit stayed `inactive`
+# forever despite being enabled, no error surfaced anywhere but the boot log
+# ("Ordering cycle found, skipping musashi-voice.service"). Turning off the
+# default dependencies removes that implicit Before=; this unit's own
+# explicit After=/Requires=musashi-effector.service already guarantees
+# correct ordering (and, transitively through it, ordering after sysinit —
+# effector still has its own default dependencies intact), so nothing here
+# actually depended on the dependencies being turned off.
+DefaultDependencies=no
 
 [Service]
 User=musashi
@@ -51,9 +91,13 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 # Whisper and Piper models are baked into the image; HOME only holds the
 # faster-whisper cache for a model that is not the configured default.
 Environment=HOME=/home/musashi
-ExecStart=/opt/gesture-engine/venv/bin/python -m musashi_voice
+# Without this the loop's sparse prints (it speaks far more than it logs)
+# sit in a stdout buffer instead of reaching the journal for minutes at a
+# time, which is exactly when you need `journalctl -fu musashi-voice` to work.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/gesture-engine/venv/bin/python -m musashi_voice --wake
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

@@ -74,16 +74,28 @@ python3 -m venv --system-site-packages /opt/gesture-engine/venv
 /opt/gesture-engine/venv/bin/pip install --no-cache-dir --no-deps /opt/musashi/effector
 
 # --- voice -------------------------------------------------------------
-# torch FIRST, from PyTorch's CPU-only index. This is not an optimisation, it
-# is the difference between a ~200 MB wheel and ~2.5 GB of nvidia-* CUDA
-# packages that this VM can never use: there is no GPU here and GPU passthrough
-# was explicitly ruled out. Installing it up front means the dependency below
-# is already satisfied and pip never reaches the default index for it.
+# torch AND torchaudio FIRST, both from PyTorch's CPU-only index. This is not
+# an optimisation, it is the difference between ~200 MB of CPU wheels and
+# ~2.5 GB of nvidia-* CUDA packages that this VM can never use: there is no
+# GPU here and GPU passthrough was explicitly ruled out. Installing both up
+# front means the dependency below is already satisfied and pip never
+# reaches the default index for either.
 #
-# torch arrives via silero-vad, not faster-whisper — faster-whisper runs on
-# CTranslate2 and has no torch dependency at all.
+# torchaudio matters even though nothing here plays audio through it:
+# silero-vad's package unconditionally does `import torchaudio` at module
+# load, and the *default* PyPI torchaudio wheel is linked against
+# libcudart.so — which does not exist on a CPU-only guest and turns into a
+# hard ImportError the moment --wake mode tries to load the VAD (torch alone
+# being CPU-only is not enough; pip is happy to pair it with a CUDA
+# torchaudio if that's what the default index serves for the dependency).
+# Discovered by booting a real image and watching musashi-voice.service fail
+# to start under --wake; PTT never surfaced it because trim_silence()
+# degrades silently when the VAD fails to load.
+#
+# torch/torchaudio arrive via silero-vad, not faster-whisper — faster-whisper
+# runs on CTranslate2 and has no torch dependency at all.
 /opt/gesture-engine/venv/bin/pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu torch
+    --index-url https://download.pytorch.org/whl/cpu torch torchaudio
 
 /opt/gesture-engine/venv/bin/pip install --no-cache-dir '/opt/musashi/voice[audio]'
 
@@ -123,6 +135,10 @@ curl -fsSL -o /opt/musashi/piper/pt_BR-faber-medium.onnx.json \
 systemctl enable seatd systemd-networkd ssh
 # Unlike gesture-engine.service, the effector needs no webcam — ship it running.
 systemctl enable musashi-effector
+# Now always-on (wake word "musashi", not push-to-talk) — it has no console
+# to be attached to, so it has to start itself. See the unit file for the
+# §2.7 security trade-off this accepts.
+systemctl enable musashi-voice
 
 # No keyboard on this system — compile the dconf override that disables the
 # Phosh lock screen's PIN/password prompt (see overlay/etc/dconf).

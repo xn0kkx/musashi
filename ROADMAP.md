@@ -111,10 +111,13 @@ gesture it will eventually be).
   (no CUDA wheels, there's no GPU passthrough), Whisper `small` snapshot at
   `/opt/musashi/whisper/small`, Piper voice at `/opt/musashi/piper/` — so
   the guest is voice-capable offline from first boot.
-- `musashi-voice.service` ships **disabled**, on purpose: without a real
-  push-to-talk gesture, any automatic activation would discard the
-  non-audio-second-factor security property PTT exists to provide (Plano
-  Diretor §2.7 — a command replayed from a speaker must never execute).
+- `musashi-voice.service` shipped **disabled** at this point, on purpose:
+  without a real push-to-talk gesture, any automatic activation would
+  discard the non-audio-second-factor security property PTT exists to
+  provide (Plano Diretor §2.7 — a command replayed from a speaker must
+  never execute). Superseded the next day — see "Done — always-on wake word"
+  below, which accepts that regression explicitly instead of waiting for a
+  gesture that doesn't exist yet.
 - **Validated live** on the rebuilt VM, real hardware, no mocks: "abrir a
   calculadora" / "fechar a calculadora" launched and closed
   `gnome-calculator` for real, with a spoken Portuguese confirmation played
@@ -125,6 +128,73 @@ gesture it will eventually be).
   continuous 14fps hand tracking competes with STT/TTS for the same CPUs;
   worth remembering before reading any single latency number as steady
   state.
+
+## Done — always-on wake word, service enabled (2026-08-20)
+
+`musashi-voice.service` now starts with the VM and never stops listening.
+Requested and accepted with the security trade-off understood: this drops
+Plano Diretor §2.7's non-audio second factor that push-to-talk provided —
+see the unit file's header comment and README.md's [Voice](README.md#voice)
+section for the full writeup, not repeated here.
+
+- **No dedicated wake-word model** (openWakeWord's pretrained models are
+  English-only; training a PT-BR model is a GPU pipeline out of scope for
+  this pass — decided in a prior session, not reopened here). Instead the
+  always-on loop reuses the `faster-whisper` transcription it already
+  produces: `musashi_voice/wakeword.py`'s `strip_wake_word()` fuzzy-matches
+  (`rapidfuzz.fuzz.ratio`, threshold 75.0, measured corpus in that module)
+  the first one or two words of every transcript against "musashi". A miss
+  is discarded silently (DEBUG log, no TTS); a hit strips the wake word and
+  hands the rest to the same `resolve_intent()` → grammar → effector → TTS
+  path the PTT loop always used.
+- **`musashi_voice/audio.py` gained continuous VAD-segmented capture**
+  (`VadSegmenter`, `listen()`) alongside the original PTT
+  `record_utterance()`, which is untouched and stays the CLI's default mode.
+  The segmenter keeps a pre-roll buffer so the "mu" of "musashi" survives
+  Silero's detection lag, and pauses/drains capture after every spoken reply
+  so the loop does not hear its own TTS confirmation and re-trigger on it —
+  real barge-in and AEC remain a documented TODO for the Plano Diretor's S3
+  streaming work, not solved here.
+- `python -m musashi_voice --wake` is the new mode the unit runs;
+  `--text`/`--list-tools`/`--devices`/plain PTT are all unchanged.
+  `build/chroot-setup.sh` now `systemctl enable`s the unit the same way it
+  already does for `musashi-effector`.
+- 21 new tests (`voice/tests/test_wake_word.py`,
+  `voice/tests/test_vad_segmenter.py`), no hardware/torch required — same
+  style as the rest of `voice/tests/`. Full suite: 126 passing (was 105).
+
+**Two real bugs surfaced only by booting the actual image**, neither
+catchable by the unit suite above (both are properties of the built venv /
+the systemd graph, not of the Python code paths the tests exercise):
+
+- **`torchaudio` resolved to a CUDA build.** `chroot-setup.sh` pinned `torch`
+  to PyTorch's CPU-only index, but `torchaudio` — pulled in transitively by
+  `silero-vad`, which unconditionally `import torchaudio`s — was left to the
+  default PyPI index, which serves a CUDA-linked wheel needing
+  `libcudart.so.13`. That import has always been broken on this GPU-less
+  guest; PTT never surfaced it because `audio.trim_silence()` degrades
+  silently when the VAD fails to load. `audio.listen()` (the `--wake` path)
+  raises instead — deliberately, VAD is load-bearing there — which is what
+  finally made the pre-existing breakage visible, as `musashi-voice.service`
+  crash-looping on boot. Fixed by installing `torch torchaudio` together
+  from the CPU-only index.
+- **A systemd ordering cycle silently dropped the unit's start job.**
+  `musashi-voice.service`, once `WantedBy=multi-user.target`, gets an
+  implicit `Before=multi-user.target`. `musashi-effector.service` is
+  deliberately `After=multi-user.target` (it needs the Phosh Wayland/D-Bus
+  session). `musashi-voice.service`'s own `Requires=`/`After=` on the
+  effector closes the loop: voice before the target, the target before
+  effector (transitively), effector before voice (mirrored). systemd's
+  answer to a real ordering cycle is to delete one job from the transaction
+  and move on — no error surfaced anywhere except one line in the boot log
+  ("Ordering cycle found, skipping musashi-voice.service"); `systemctl
+  status` just showed `enabled`/`inactive` forever, and a manual
+  `systemctl start` worked fine (a single-unit transaction doesn't hit the
+  same cycle), which is exactly the trap: it looked configured correctly
+  under every check except an actual cold boot. Fixed with
+  `DefaultDependencies=no` on `musashi-voice.service` (see the unit file for
+  the full graph walkthrough); confirmed with a real `systemctl reboot`
+  inside the guest, not just `systemctl start`.
 
 ## Design note — LLM inference moves off the core (Plano Diretor, 2026-08-19)
 
