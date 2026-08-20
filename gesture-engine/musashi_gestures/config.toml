@@ -67,6 +67,56 @@ tap_dwell = 0.06         # seconds a tap contact stays down
 swipe_steps = 24         # interpolation steps for a synthesized edge swipe
 swipe_step_dt = 0.006    # seconds between swipe steps (~150ms swipe total)
 swipe_down_dwell = 0.02  # seconds to hold the initial contact before moving it
+# Still used for tap/long-press and the legacy replay for left/right (and
+# up/down as a fallback when [edge_swipe] is disabled) — see edgedrag.py's
+# module docstring for why up/down moved off this path.
+
+# Live-follow edge-drag (up/down): touch tracks the hand in real time instead
+# of classifying a gesture after the fact and replaying a fixed path. See
+# docs/GESTURES.md "Edge drag" and edgedrag.py's module docstring. Disabled
+# by default until validated live on the VM (see ROADMAP.md) — flip
+# `enabled` once that's done; the legacy classifier above keeps handling
+# every direction unchanged while this is off.
+[edge_swipe]
+enabled       = true
+directions    = ["up", "down"]
+arm_frames    = 2        # consecutive palm-posture frames needed to arm
+arm_window    = 0.40     # seconds an armed gesture has to start moving
+start_slop    = 0.06     # screen-normalized displacement to start the drag
+                          # (~32px logical @ 960x540) — vs 0.8 hand-scales for
+                          # the legacy classifier; phoc's own accept distance
+                          # is only 16px, so this clears it in one jump
+axis_margin   = 0.03     # dominance of the vertical axis over the horizontal
+                          # one, ADDITIVE (not a ratio) — screen-normalized
+follow_gain   = 1.0       # hand -> screen gain; 1.0 = same as the cursor
+axis_lock     = true      # freeze X for the whole drag — CRITICAL: phoc
+                          # rejects a drag outright on ~24px of transverse
+                          # movement while it's still deciding to accept it
+edge_inset    = 0.006     # Y of the touch-down (~3px logical @ 960x540) —
+                          # calibrated empirically on the VM: the pure-distance
+                          # drag path only accepts a touch-down within ~3-8px
+                          # of the true edge (see ROADMAP.md); this sits
+                          # inside that window with a little margin
+x_anchor_min  = 0.20
+x_anchor_max  = 0.80
+release_grace = 0.13      # seconds of lost palm-hold posture tolerated
+lost_grace    = 0.13      # seconds of a completely lost hand tolerated
+max_duration  = 2.5       # seconds — safety net, emits "cancel"
+cooldown      = 0.30      # seconds before the next drag can arm
+
+[edge_swipe.stream]
+slot        = 1          # SAME slot as the legacy TouchSequencer — shared on
+                          # purpose, so only one of the two can ever be
+                          # active at a time by construction (see __main__.py)
+rate_hz     = 120
+mode        = "extrapolate"  # "extrapolate" | "interpolate" | "off"
+max_predict = 0.10       # dead-reckoning ceiling for ONE missed camera frame
+                          # (~0.066s expected gap @ 15fps) — see
+                          # touchstream.py's module docstring for why this is
+                          # much larger than a touchscreen-rate resampler's
+min_delta   = 0.0005      # dedupe threshold (~0.3px logical @ 960x540)
+watchdog    = 1.5         # seconds without an update() before releasing the
+                          # contact on its own (stuck camera loop, exception)
 
 [overlay]
 # camera preview + hand skeleton window. Uses cv2.imshow (Qt/xcb), which

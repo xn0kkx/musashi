@@ -25,6 +25,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from statistics import median
 
+from .edgedrag import EdgeDragTracker, EdgePhase
+
 WRIST, THUMB_TIP, INDEX_MCP, INDEX_PIP, INDEX_TIP = 0, 4, 5, 6, 8
 MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP = 9, 10, 12
 RING_PIP, RING_TIP, PINKY_PIP, PINKY_TIP = 14, 16, 18, 20
@@ -53,7 +55,8 @@ class Actions:
     touch: bool | None = None            # live touch press/release transition
     touch_at: tuple | None = None        # live touch position when touch is down
     long_press: bool = False             # fire a long-press sequence at touch_at
-    swipe: str | None = None             # "up" | "down" | "left" | "right"
+    swipe: str | None = None             # "left" | "right" (up/down: see edge_drag)
+    edge_drag: object | None = None      # EdgeDragEvent | None — live-follow up/down
     state: str = "idle"                  # for the overlay/debug
     debug: dict = field(default_factory=dict)
 
@@ -96,6 +99,11 @@ class GestureStateMachine:
         self._aspect_y = (height / width) if width and height else 1.0
 
         self.sequencer = sequencer
+        # Live-follow edge-drag for up/down (see edgedrag.py). Defaults to
+        # disabled if the section is absent, so a config predating this
+        # feature behaves exactly as before — the legacy classifier below
+        # keeps handling every direction in that case.
+        self.edge_tracker = EdgeDragTracker(cfg.get("edge_swipe", {"enabled": False}))
 
         self.touch_down = False
         self._touch_streak = 0
@@ -146,6 +154,21 @@ class GestureStateMachine:
             and thumb > self.thumb_out
         )
         return ok, {"ext": ext, "thumb": round(thumb, 2)}
+
+    def _palm_hold(self, lm) -> bool:
+        """Relaxed *maintenance* gate for an edge-drag already in flight.
+
+        `_open_palm` is the strict *entry* gate (full posture + thumb-out,
+        so a pinch can never be misread as an open palm). Once a drag is
+        actually following the hand, that full posture shouldn't be required
+        every single frame — a ring/pinky flicker or the thumb drifting
+        mid-drag is exactly the kind of landmark noise a slow, deliberate
+        drag will produce, and aborting on it would defeat the whole point
+        of live-follow. Only index-or-middle extended is required to keep
+        holding the contact down.
+        """
+        return (self._extended(lm, INDEX_TIP, INDEX_PIP)
+                or self._extended(lm, MIDDLE_TIP, MIDDLE_PIP))
 
     def _map_cursor(self, lm) -> tuple:
         x, y = lm[self.cursor_landmark][0], lm[self.cursor_landmark][1]
@@ -279,10 +302,16 @@ class GestureStateMachine:
     def update(self, lm, now: float) -> Actions:
         act = Actions()
 
-        # A timed sequence (swipe/long-press) is in flight — don't fight it
-        # with live touch input from the same frame's landmarks.
+        # A timed sequence (tap/long-press/legacy replay) is in flight on the
+        # sequencer's slot — don't fight it with live touch input from the
+        # same frame's landmarks. The cursor is a separate uinput device from
+        # the touch it drives, so it's allowed to keep moving/visible while a
+        # synthesized sequence plays on slot 1 — only the live touch (slot 0)
+        # and arming a new gesture are suppressed.
         if self.sequencer is not None and self.sequencer.busy:
             self._release_touch(act)
+            if lm is not None:
+                act.cursor = self._map_cursor(lm)
             act.state = "sequence"
             return act
 
@@ -291,7 +320,13 @@ class GestureStateMachine:
             self._touch_streak = self._long_press_streak = 0
             if self._palm_streak or (now - self._last_palm_t) <= self._palm_grace_s:
                 self._episode_dropped += 1
-            act.state = "no-hand"
+            # Still feed the edge-drag tracker even with no hand at all — an
+            # in-flight drag has its own lost-hand grace window and must be
+            # able to release cleanly rather than hang forever.
+            edge_event = self.edge_tracker.update(None, False, False, now)
+            if edge_event is not None:
+                act.edge_drag = edge_event
+            act.state = "edge-drag" if self.edge_tracker.active else "no-hand"
             return act
 
         scale = _dist(lm[WRIST], lm[MIDDLE_MCP]) or 1e-6
@@ -317,25 +352,50 @@ class GestureStateMachine:
             or (now - self._last_palm_t) <= self._palm_grace_s
         )
 
-        if armed or palm_ok:
-            # Open palm (or recently open): navigation mode. A pinch is
-            # physically impossible with the hand open, so this never
-            # competes with touch/long-press while truly open; the grace
-            # window only extends swipe *detection*, not touch suppression.
+        # Live-follow edge-drag: fed every frame that has a hand, with its
+        # own independent arm/drag/cooldown state machine (edgedrag.py). A
+        # no-op every frame when disabled (cfg [edge_swipe].enabled=false),
+        # which keeps this whole path a no-op and everything below behaving
+        # exactly as it did before edge-drag existed.
+        edge_event = self.edge_tracker.update(act.cursor, palm_ok, self._palm_hold(lm), now)
+        if edge_event is not None:
+            act.edge_drag = edge_event
+
+        nav_mode = armed or palm_ok or self.edge_tracker.phase is not EdgePhase.IDLE
+
+        if nav_mode:
+            # Open palm (or recently open, or an edge-drag in flight):
+            # navigation mode. A pinch is physically impossible with the hand
+            # open, so this never competes with touch/long-press while truly
+            # open; the grace window only extends swipe *detection*, not
+            # touch suppression.
             self._release_touch(act)
             self._touch_streak = self._long_press_streak = 0
-            if armed:
+            if armed and not self.edge_tracker.active:
                 direction, reason, v, travel = self._detect_swipe(now)
-                act.swipe = direction
                 act.debug["swipe_reject"] = reason
                 act.debug["v"] = round(v, 2)
                 act.debug["travel"] = round(travel, 2)
                 self._episode_update(reason, v, travel)
+                # up/down are owned by the live-follow tracker once it's
+                # enabled for them — drop the legacy replay's result rather
+                # than also firing on the same TouchSequencer slot.
+                owned_by_edge_drag = (
+                    direction in ("up", "down")
+                    and self.edge_tracker.enabled
+                    and direction in self.edge_tracker.directions
+                )
+                act.swipe = None if owned_by_edge_drag else direction
                 if reason == "fire":
                     closed = self._episode_close()
                     if closed:
                         act.debug["episode"] = closed
-            act.state = "palm" if palm_ok else "grace"
+            if self.edge_tracker.active:
+                act.state = "edge-drag"
+            elif self.edge_tracker.phase is EdgePhase.ARMED:
+                act.state = "armed"
+            else:
+                act.state = "palm" if palm_ok else "grace"
             return act
 
         # Hand is in a non-palm, non-grace posture: any swipe attempt that

@@ -283,6 +283,94 @@ packages) — this is the only non-overlay change from this investigation.
   `xwayland` package and `phoc.ini` has set `xwayland = true` since the
   gesture-engine work landed. Worth a docs cleanup pass.
 
+## Done — live-follow edge drag for up/down, replacing classify-then-replay (2026-08-20)
+
+Live VM testing with a real webcam (not synthetic touches) surfaced two
+things the earlier validation pass above didn't catch, because it only ever
+drove the touch injector directly: (1) swipes fired inconsistently — the
+same fast, deliberate flick would sometimes not register at all; (2) even
+when they fired, the interaction felt nothing like a real touchscreen — a
+canned ~150ms animation plays regardless of how the hand actually moved.
+
+Root-caused with the gesture-engine log (`palm-episode end ... verdict=`)
+and, separately, by reading phoc/Phosh's own source
+(`layer-shell-effects.c`, `gesture-swipe.c`, `cursor.c`, `home.c`,
+`top-panel.c`): the *synthesized touch* was never the problem — the old
+replay already covered 64.5% of the screen, well past what phoc requires.
+The *classifier deciding whether to fire it* was: `gestures.py::_detect_swipe`
+judges a 0.3s window of wrist history against `swipe_min_travel` (0.8
+hand-scales), and MediaPipe reliably loses hand tracking at exactly the peak
+velocity of a real flick (motion blur) — discarding the single most
+informative sample right when the travel gate needs it most. Two smaller
+bugs confirmed in the same pass: `swipe_velocity` was mathematically
+unreachable as an independent gate given the packaged `swipe_window` (travel
+≥ 0.8 over ≤ 0.3s already implies v ≥ 2.67, above the 2.0 gate); and
+`palm_grace_frames`/`swipe_arm_frames` computed their wall-clock grace
+assuming the configured 30fps, while the camera actually delivers ~15fps —
+halving the intended grace window.
+
+Fix implemented is architectural, not just a retune: **up/down are now a
+live-follow edge drag** (`gesture-engine/musashi_gestures/edgedrag.py` +
+`touchstream.py`), replacing "classify after the fact, replay a fixed path"
+for those two directions. An open palm + a small vertical motion
+(`start_slop`) arms a drag; the touch goes down anchored exactly on the
+screen edge (not wherever the hand happens to be) and then only the hand's
+*delta* since arming drives the touch, horizontal axis frozen
+(`axis_lock`); releasing the palm posture (or losing the hand) lifts the
+touch and **phoc itself** decides whether that was a fold/unfold, the same
+way it would for a real finger. `docs/GESTURES.md` has the full design
+writeup ("Edge drag" section) and the reasoning behind every threshold.
+Left/right and the voice/effector `shell.swipe` path are untouched, still
+served by the original classifier + `TouchSequencer` replay.
+
+- **phoc's actual acceptance thresholds, calibrated empirically on this
+  VM's phoc 0.46.0** (not just read off phoc's upstream source, which can
+  drift from what's actually packaged) — driving `TouchInjector` directly
+  over SSH, sweeping the touch-down position and watching `grim`
+  before/after: the pure-distance drag path only accepts a touch-down
+  within **~3-8 logical px of the true edge** (`y=0.995` → opens; `y=0.985`
+  → nothing), noticeably tighter than phoc upstream's own
+  `PHOSH_HOME_BAR_HEIGHT`/`PHOSH_TOP_BAR_HEIGHT` (~15px/~32px) would
+  suggest. Separately, a fast/full-length drag (the **fling** path) was
+  confirmed to work from *anywhere* on screen, including dead center —
+  `phoc_gesture_swipe_new()` is a compositor-wide cursor gesture, not
+  gated by where the touch started. `edge_inset = 0.006` (~3.2px logical)
+  in `config.toml` sits inside the narrow distance-path window with a
+  small margin.
+- **`time.sleep(0.006)` under this VM's KVM measured at 6.06-6.19ms**
+  (target 6ms) — precise enough that the resampler's default `rate_hz =
+  120` needs no fallback to a lower rate.
+- **Live-follow validated end-to-end with real hand gestures**, both
+  directions, via the engine's own log: multiple `up` drags fired with
+  90-196 `touch.move()` events each (vs. 24 for the old replay,
+  comfortably above the ≥15-events-per-150ms target derived from phoc's
+  own fling-velocity window), and `down` drags — as short as 0.3-0.4s —
+  still visibly opened the quick-settings panel (`grim` confirmed the
+  padlock + brightness/Wi-Fi/Bluetooth panel on screen), matching the
+  30%-of-screen distance-acceptance path rather than needing a fling.
+- One deliberate, user-facing behavior change: a short, slow flick that
+  used to always fire the full canned replay animation now only opens the
+  panel if the *live* drag actually clears phoc's own thresholds — "the
+  gesture fired" and "something visibly opened" are no longer guaranteed
+  to be the same event. This is correct (it's what a real touchscreen
+  does), documented in `docs/GESTURES.md`, not something to "fix" back.
+- A bug specific to *this development session*, not the shipped code: a
+  quick manual restart of the gesture-engine process over a plain SSH
+  session got silently `SIGKILL`'d within ~1.5s every time (`systemd-run
+  --user` confirmed it, journal showed `code=killed, status=9/KILL` with
+  no further explanation) — worth remembering for next time: use a full
+  VM reboot to restart the autostarted process, not a bare `pkill` +
+  manual relaunch over SSH.
+- Left/right were deliberately **not** touched this pass — the lateral
+  gesture the Phosh build installed here actually recognizes for app-grid
+  paging (if any; `HdySwipeTracker`/`PhoshSwipeAwayBin` symbols exist in
+  the binary, `phosh_top_panel.c`'s home-bar swipe MR was uncertain to be
+  merged in 0.46.0) was never confirmed, unlike up/down's phoc mechanism.
+  Investigating that, and retuning the legacy classifier's thresholds
+  (`swipe_min_travel`, `swipe_window`, `swipe_axis_ratio` → additive
+  margin, `swipe_cooldown`, the fps-assumption bug above) which still
+  serves left/right, is follow-up work, not done here.
+
 ## Later — pivot to MusashiOS (see Plano Diretor for the full roadmap)
 
 The project's target is changing: from "gesture-controlled OS in a VM" to a

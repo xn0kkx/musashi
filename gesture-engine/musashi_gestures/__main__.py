@@ -19,6 +19,7 @@ from .injector import PointerInjector, TouchInjector
 from .intents import Arg, Intent, Registry, ToolClass
 from .sequencer import TouchSequencer
 from .smoothing import PointFilter
+from .touchstream import TouchStreamer
 
 log = logging.getLogger("musashi-gestures")
 
@@ -95,7 +96,7 @@ def _log_episode(act) -> None:
     )
 
 
-def _build_gesture_registry(touch, sequencer, machine) -> Registry:
+def _build_gesture_registry(touch, sequencer, machine, streamer) -> Registry:
     """In-process tool table for the gesture engine.
 
     Only *discrete* gestures are dispatched through it. Cursor motion and the
@@ -115,12 +116,20 @@ def _build_gesture_registry(touch, sequencer, machine) -> Registry:
     def _swipe(dir: str):
         # Belt-and-braces: guarantee the synthesized swipe (slot 1) is never
         # joined by a stuck live-touch contact (slot 0) — a no-op if slot 0
-        # is already up.
+        # is already up. Also never joined by the live-follow edge-drag
+        # streamer, which shares slot 1 by construction (see touchstream.py)
+        # — this should be structurally unreachable (gestures.py never
+        # proposes shell.swipe for a direction the tracker owns while it's
+        # active), but the check is cheap and the invariant matters.
+        if streamer.active:
+            return None
         touch.up(0)
         sequencer.edge_swipe(dir)
         return dir
 
     def _long_press(x: float, y: float):
+        if streamer.active:
+            return None
         sequencer.long_press(x, y, machine.long_press_hold)
         return None
 
@@ -156,7 +165,11 @@ def main() -> int:
     sequencer = TouchSequencer(touch, **cfg["touch"])
     machine = GestureStateMachine(cfg, sequencer)
     smoother = PointFilter(**cfg["smoothing"])
-    registry = _build_gesture_registry(touch, sequencer, machine)
+    # Same slot as the sequencer (1) — by construction only one of the two is
+    # ever active at a time, see gestures.py/edgedrag.py and touchstream.py's
+    # module docstring.
+    streamer = TouchStreamer(touch, cfg.get("edge_swipe", {}).get("stream", {}))
+    registry = _build_gesture_registry(touch, sequencer, machine, streamer)
     log.info("intent registry: %s", registry.names())
 
     overlay = None
@@ -176,7 +189,10 @@ def main() -> int:
     log.info("gesture engine started")
     frames, t_report = 0, time.monotonic()
     palm_log_state = {"t": 0.0}
-    counters = {"palm_frames": 0, "hand_lost": 0, "fired": 0, "rej": {}}
+    counters = {
+        "palm_frames": 0, "hand_lost": 0, "fired": 0, "rej": {},
+        "edge_drag_released": 0, "edge_drag_cancelled": 0,
+    }
     try:
         while running:
             frame = cam.read()
@@ -199,6 +215,32 @@ def main() -> int:
                 log.debug("touch up")
             elif act.touch_at is not None and machine.touch_down:
                 touch.move(0, *(pos if pos is not None else act.touch_at))
+
+            # Live-follow edge-drag: a continuous stream, like the cursor and
+            # the live pinch touch above — not a proposable Intent, see
+            # _build_gesture_registry's docstring for why those stay inline.
+            ed = act.edge_drag
+            if ed is not None:
+                if ed.phase == "down":
+                    streamer.begin(ed.x, ed.y, ed.t)
+                    log.info("edge-drag down dir=%s", ed.dir)
+                elif ed.phase == "move":
+                    streamer.update(ed.x, ed.y, ed.t)
+                elif ed.phase in ("up", "cancel"):
+                    streamer.end(ed.t)
+                    stats = streamer.take_stats()
+                    ep = machine.edge_tracker.take_episode() or {}
+                    log.info(
+                        "edge-drag %s dir=%s frames=%s dur=%s keyframes=%s moves=%s "
+                        "predicted=%s held=%s",
+                        ed.phase, ed.dir, ep.get("frames"), ep.get("duration"),
+                        stats.get("keyframes"), stats.get("moves"),
+                        stats.get("predicted"), stats.get("held"),
+                    )
+                    if ed.phase == "cancel":
+                        counters["edge_drag_cancelled"] += 1
+                    else:
+                        counters["edge_drag_released"] += 1
 
             # Discrete gestures become Intents and go through the registry;
             # the registry, not this loop, decides whether they run.
@@ -238,15 +280,24 @@ def main() -> int:
             if now - t_report >= 5.0:
                 rej_str = " ".join(f"{k}:{v}" for k, v in counters["rej"].items())
                 log.info(
-                    "fps=%.1f state=%s %s palm_frames=%d hand_lost=%d fired=%d rej{%s}",
+                    "fps=%.1f state=%s %s palm_frames=%d hand_lost=%d fired=%d "
+                    "edge_drag_released=%d edge_drag_cancelled=%d rej{%s}",
                     frames / (now - t_report), act.state, act.debug,
-                    counters["palm_frames"], counters["hand_lost"], counters["fired"], rej_str,
+                    counters["palm_frames"], counters["hand_lost"], counters["fired"],
+                    counters["edge_drag_released"], counters["edge_drag_cancelled"], rej_str,
                 )
                 frames, t_report = 0, now
-                counters = {"palm_frames": 0, "hand_lost": 0, "fired": 0, "rej": {}}
+                counters = {
+                    "palm_frames": 0, "hand_lost": 0, "fired": 0, "rej": {},
+                    "edge_drag_released": 0, "edge_drag_cancelled": 0,
+                }
     finally:
         if overlay:
             overlay.close()
+        abort_ev = machine.edge_tracker.abort(time.monotonic())
+        if abort_ev is not None:
+            streamer.end(abort_ev.t)
+        streamer.stop()
         sequencer.stop()
         touch.close()
         pointer.close()

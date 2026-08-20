@@ -188,7 +188,14 @@ def test_slow_palm_move_does_not_swipe():
 
 
 def test_diagonal_rejected_but_shallow_accepted():
-    cfg = _cfg(cursor={"mirror_x": False})
+    # Isolates the legacy axis-ratio/diagonal logic: with edge_swipe enabled
+    # (the packaged default), a near-45-degree motion can arm the live-follow
+    # tracker instead — it works off screen-space cursor coordinates, a
+    # different projection than this test's hand-scale/aspect-corrected
+    # "true diagonal", so the two don't reject at exactly the same angle.
+    # That's fine (edge_swipe only ever owns up/down), but it's not what this
+    # test is checking.
+    cfg = _cfg(cursor={"mirror_x": False}, edge_swipe={"enabled": False})
     aspect_y = cfg["camera"]["height"] / cfg["camera"]["width"]
 
     # True 45 degrees *after* the aspect correction: raw dy is scaled up by
