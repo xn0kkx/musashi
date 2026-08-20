@@ -371,6 +371,65 @@ served by the original classifier + `TouchSequencer` replay.
   margin, `swipe_cooldown`, the fps-assumption bug above) which still
   serves left/right, is follow-up work, not done here.
 
+## Done — root-caused the 15fps ceiling + camera watchdog & unquantized read (2026-08-20)
+
+Instrumented the capture→inference pipeline (per-stage `prof`/`pf` log
+lines behind `[debug] profile` in config.toml — temporary, remove when no
+longer useful) and measured instead of guessing. Findings, in order of
+surprise:
+
+- **The 15.0fps ceiling is the camera itself, not software.** `capread`
+  (producer-side `cap.read()` duration) sits at 66.7ms/frame in dim light
+  and 33.3ms in bright scenes — the XIFT camera's internal auto-exposure
+  stretches the shutter past 33ms and halves the sensor rate. Verified on
+  the host with ffmpeg, no QEMU involved: 15fps delivered while the
+  firmware advertises only "30fps" for MJPG 640x480. The UVC exposure
+  controls are cosmetic (0.5ms vs 66ms barely changes brightness, fps
+  never moves), so no software setting can force a short shutter —
+  **ambient light is the only lever**, and it also cuts the motion blur
+  that makes MediaPipe drop the hand mid-flick. Isoc bandwidth is not the
+  limit (304B/µframe alt-setting ≈ 2.4MB/s vs ~25KB JPEGs = 0.77MB/s).
+  Side effect of probing: the camera latched `auto_exposure=1 (Manual)`
+  into NVRAM and refuses to go back to 0/3; behavior is unchanged (the
+  control was fake all along) but `v4l2-ctl -l` shows Manual Mode now.
+- **Inference is fast**: `detect_for_video` p50 10-48ms on the VM's CPU,
+  spiking to 70-190ms only on palm re-detection frames (`recov=1`). When
+  the camera delivered a true 30fps window, the whole engine followed at
+  ~30fps with a detection every frame (gap p50 33ms) — the bundled model
+  (bit-identical to Google's only published float16 bundle; there is no
+  official "lite" .task) is not the bottleneck.
+- **The USB stream dies silently** (controls answer, frames stop; nothing
+  in either dmesg). Short ~1.4s hiccups happen in normal operation, 10s+
+  wedges happen too, and one hard wedge survived a VM reboot and needed a
+  host-side simulated replug (`/sys/bus/usb/devices/<port>/authorized`
+  0→1). Before this pass the engine had no recovery at all: a wedge left
+  it blocked in `cap.read()` forever, mute, until a VM reboot.
+
+Two fixes shipped in `camera.py`, both covered by new host-side tests
+(`tests/test_camera.py`, fake cv2, same pattern as the fake-UInput tests):
+
+- **Stall watchdog**: the producer thread reopens the VideoCapture after
+  `reopen_after` (3s) without a frame, retrying every 1s while the device
+  node is missing, `reopen=` counter surfaced in the `prof` line. Validated
+  live twice: an induced uvcvideo unbind/rebind (recovered ~1s after the
+  node returned) and three spontaneous 10.0s wedges minutes later, each
+  revived in ~80ms with frames and hand tracking resuming. Worst case per
+  wedge is now ~10s of blindness (OpenCV's internal V4L2 select-timeout
+  floor) instead of permanent death.
+- **Unquantized `read()`**: the consumer used a bare `cond.wait()`, always
+  sleeping until the *next* capture even with a frame already pending —
+  quantizing the loop to integer divisors of the camera rate whenever
+  processing outran one frame period. Now `wait_for` returns immediately
+  on a pending frame. Measured effect: windows with 104-190ms inference
+  spikes dropped 0-4% of frames vs 16-18% before.
+
+Not fixed here, known follow-ups: ambient-light experiment (scenario D of
+the investigation plan — fast swipes with/without extra light, comparing
+`none=`/`gap` in the `pf` lines); `tests/test_dispatch_registry.py` was
+already broken before this pass (`_build_gesture_registry` grew a
+`streamer` arg, fixture never updated, 6 failures); the legacy classifier's
+30fps assumption (`palm_grace_frames`, above) still stands.
+
 ## Later — pivot to MusashiOS (see Plano Diretor for the full roadmap)
 
 The project's target is changing: from "gesture-controlled OS in a VM" to a
