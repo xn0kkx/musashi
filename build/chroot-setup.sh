@@ -20,6 +20,17 @@ apt-get install -y --no-install-recommends \
     dconf-gsettings-backend dconf-cli xdg-desktop-portal-phosh \
     libgl1-mesa-dri seatd foot gnome-calculator xwayland
 
+# Compositor/input introspection tools — used to validate phoc's output
+# config (wlr-randr: confirm the [output:Virtual-1] section in phoc.ini
+# actually matches the enumerated output and scale=2 is applied) and the
+# uinput-synthesized touch events from gesture-engine (libinput-tools/evtest:
+# confirm phoc sees genuine TOUCH_DOWN/MOTION/UP frames, not a stray pointer
+# device). None of these run automatically; they're for `ssh`-based
+# debugging. See ROADMAP.md "Done — validated phoc output..." for the
+# commands.
+apt-get install -y --no-install-recommends \
+    wlr-randr grim evtest libinput-tools
+
 # Camera + gesture engine runtime
 apt-get install -y --no-install-recommends \
     v4l-utils python3 python3-venv \

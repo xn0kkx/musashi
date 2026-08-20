@@ -243,16 +243,45 @@ above threshold, rejection reasons behaving sanely (`too-short`, `diagonal`,
 responds to every fired swipe (home/notifications/app-grid paging) or only
 registers some of them — see the open item below.
 
-## Now — needs further VM validation
+## Done — validated phoc output naming and edge-swipe recognition (2026-08-20)
 
-- Confirm that `phoc.ini` uses the right output name (`Virtual-1`) — if phoc
-  enumerates a different name, the section is silently ignored and
-  `scale=2` doesn't apply (QEMU fullscreen still works, only touch-target
-  sizing is wrong). Check with `wlr-randr` or the phoc log.
-- Confirm phoc recognizes the fired swipes as genuine edge gestures (origin
-  close enough to the edge, plausible velocity) and not as a slow drag —
-  use the log to tell "didn't fire" (engine) apart from "fired but phoc
-  ignored it" (compositor).
+Both items below were previously unverified guesses; the compositor never
+actually logs a warning when they're wrong, so the only way to know was to
+boot the VM and look. Neither turned out to be a bug — no code or config
+change was needed for either. The guest image had none of the diagnostic
+tools this needed (`wlr-randr`, `evtest`, `libinput-tools`, `grim`), so they
+were installed live via `apt` and added to `chroot-setup.sh` so future
+rebuilds keep them (`## Graphics` section, right after the phosh/phoc
+packages) — this is the only non-overlay change from this investigation.
+
+- **`phoc.ini`'s output name is correct.** `wlr-randr` inside the VM
+  (`XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 wlr-randr`)
+  reports the enumerated output as `Virtual-1` at `1920x1080` with
+  **`Scale: 2.000000`** — exactly matching `[output:Virtual-1]` /
+  `scale = 2` in `build/overlay/etc/phosh/phoc.ini`, confirming the section
+  is read and applied, not silently ignored. Cross-checked against
+  `/sys/class/drm/card0-Virtual-1`, which names the same DRM connector.
+  Note for next time: phoc isn't a systemd unit (it's launched from
+  `~musashi/.bash_profile` on tty1), but its stdout/stderr still land in
+  the journal via the login session — `journalctl -t phoc` works with no
+  extra instrumentation needed.
+- **Fired swipes are recognized as genuine edge gestures, not drags.**
+  Drove `gesture-engine`'s own `TouchInjector`/`TouchSequencer`
+  (`gesture-engine/musashi_gestures/{injector,sequencer}.py`) directly over
+  SSH — same uinput device, same timing (24 steps × 6ms + 20ms initial
+  dwell ≈ 176ms end-to-end, confirmed by `libinput debug-events`: device
+  `musashi-gesture-touch` reports `cap:t ntouches 4`, a clean
+  `TOUCH_DOWN → 24× TOUCH_MOTION → TOUCH_UP` sequence, origin at
+  `y=99.5%`/`y=0.5%` as configured). Before/after `grim` screenshots prove
+  the shell state actually changed: an `up` swipe from the lock screen
+  opened the app drawer (search bar + app grid appeared), and a following
+  `down` swipe closed it back. No drag/pointer misinterpretation observed
+  in either direction.
+- Side note, not fixed here (out of scope for this pass): `config.toml`'s
+  `[overlay]` comment and this file's own "Later" section both still claim
+  the guest has no Xwayland — `chroot-setup.sh` has installed the
+  `xwayland` package and `phoc.ini` has set `xwayland = true` since the
+  gesture-engine work landed. Worth a docs cleanup pass.
 
 ## Later — pivot to MusashiOS (see Plano Diretor for the full roadmap)
 
