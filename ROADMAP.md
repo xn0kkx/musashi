@@ -287,9 +287,32 @@ work within Phase 0/3 of the pivot:
 
 - **Persistent gesture calibration** (hand size, distance to camera) per
   user — today only via manual `/etc/musashi/config.toml` edits.
-- **Bare-metal / GRUB boot** — the current MVP only works with QEMU's
-  `-kernel`/`-initrd`. Running outside a VM would need GRUB + real
-  kernel/initrd on disk.
+- **Bare-metal / GRUB boot, installable ISO** — the current image is a QEMU
+  appliance, not a distro: partitionless ext4 (`root=/dev/vda`), no
+  bootloader (`out/vmlinuz`/`out/initrd.img` passed straight to QEMU's
+  `-kernel`/`-initrd`), hardcoded `musashi`/`musashi` autologin, hardware
+  assumed to be QEMU's virtio/`intel-hda`. Turning this into something that
+  boots on real hardware from a USB stick needs, roughly in dependency
+  order:
+  - a real bootloader (GRUB, BIOS+UEFI hybrid) and a partitioned target disk
+    (ESP + root) instead of the current single ext4 blob;
+  - an installer — reusing `build/chroot-setup.sh` as the rootfs-customize
+    step, either under Debian's `live-build` (the standard path: handles
+    squashfs + isolinux/GRUB + live-boot initramfs for free) or a from-scratch
+    `mksquashfs` + `xorriso -as mkisofs` pipeline for more control;
+  - generic hardware support in the initramfs (storage/net/GPU modules
+    beyond virtio) and non-free firmware for real Wi-Fi/GPU, none of which
+    has ever been exercised outside QEMU;
+  - an actual first-boot user/hostname/password flow instead of the current
+    hardcoded overlay account;
+  - minimal branding (`/etc/os-release`, `/etc/debian_version` override) so
+    the result identifies as MusashiOS rather than bare Debian trixie.
+  `build-image.sh` would stay as-is for fast VM iteration; ISO generation
+  would be a second, parallel build pipeline, not a replacement.
+- **Package/repository selection for the built-in toolset** — open decision,
+  not yet made: which apt repos beyond Debian's own (backports? third-party
+  PPA-equivalents?) and which package set ships by default, versus what a
+  user installs after the fact. Blocks writing the ISO's package list.
 - **Multi-hand / two-hand gestures** — MediaPipe runs with `num_hands=1`.
 - **Visual gesture-state feedback** — no overlay enabled by default (needs
   Xwayland, which the guest doesn't have); debugging today is log-only
