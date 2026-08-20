@@ -121,6 +121,13 @@ min_delta   = 0.0005      # dedupe threshold (~0.3px logical @ 960x540)
 watchdog    = 1.5         # seconds without an update() before releasing the
                           # contact on its own (stuck camera loop, exception)
 
+[debug]
+# TEMPORARY: per-stage pipeline profiling for the sparse-keyframe
+# investigation ("prof" 5s aggregates + "pf" per-frame lines during
+# palm/grace/edge-drag windows). Remove the flag and the _Prof plumbing in
+# __main__.py once the investigation closes.
+profile = true
+
 [overlay]
 # camera preview + hand skeleton window. Uses cv2.imshow (Qt/xcb), which
 # needs Xwayland — Phosh is pure Wayland (no Xwayland), so this is off by

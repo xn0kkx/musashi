@@ -96,6 +96,76 @@ def _log_episode(act) -> None:
     )
 
 
+class _Prof:
+    """TEMPORARY: per-stage profiler for the sparse-keyframe investigation.
+
+    Splits each loop iteration into read-wait / cvtColor+mp.Image /
+    detect_for_video, tracks the gap between consecutive *detected* frames,
+    and counts produced vs consumed camera frames. Aggregates land in a
+    "prof" line next to the 5s report; per-frame "pf" lines are emitted by
+    the caller only during palm/grace/edge-drag windows. Gated by
+    [debug] profile in config; remove with the rest of the investigation.
+    """
+
+    def __init__(self, cam):
+        self._cam = cam
+        self._last_seq = 0
+        self._last_detect_t = None
+        self.reset()
+
+    def reset(self):
+        self._wait, self._age, self._cvt = [], [], []
+        self._det_hand, self._det_none, self._gap = [], [], []
+        self._none = self._total = self._recovered = 0
+
+    @staticmethod
+    def _pct(vals):
+        """p50/p90/max of a list of ms values, or '-' when empty."""
+        if not vals:
+            return "-"
+        s = sorted(vals)
+        p50 = s[len(s) // 2]
+        p90 = s[min(len(s) - 1, int(len(s) * 0.9))]
+        return f"{p50:.1f}/{p90:.1f}/{s[-1]:.1f}"
+
+    def frame(self, wait_ms: float, age_ms: float, timing: dict, now: float):
+        """Record one loop iteration; returns gap-to-previous-detection in ms
+        for detected frames (None otherwise, and on the very first one)."""
+        self._wait.append(wait_ms)
+        self._age.append(age_ms)
+        self._cvt.append(timing.get("cvt_ms", 0.0))
+        self._total += 1
+        gap_ms = None
+        if timing.get("detected"):
+            self._det_hand.append(timing["det_ms"])
+            if timing.get("recovered"):
+                self._recovered += 1
+            if self._last_detect_t is not None:
+                gap_ms = (now - self._last_detect_t) * 1000.0
+                self._gap.append(gap_ms)
+            self._last_detect_t = now
+        else:
+            self._det_none.append(timing.get("det_ms", 0.0))
+            self._none += 1
+        return gap_ms
+
+    def report(self, consumed: int) -> str:
+        produced_total, read_ms = self._cam.take_producer_stats()
+        produced = produced_total - self._last_seq
+        self._last_seq = produced_total
+        drop = 100.0 * (1.0 - consumed / produced) if produced else 0.0
+        line = (
+            f"prof produced={produced} consumed={consumed} drop={drop:.0f}% "
+            f"capread={self._pct(read_ms)} wait={self._pct(self._wait)} "
+            f"age={self._pct(self._age)} cvt={self._pct(self._cvt)} "
+            f"det_hand={self._pct(self._det_hand)} det_none={self._pct(self._det_none)} "
+            f"none={self._none}/{self._total} recov={self._recovered} "
+            f"gap={self._pct(self._gap)}"
+        )
+        self.reset()
+        return line
+
+
 def _build_gesture_registry(touch, sequencer, machine, streamer) -> Registry:
     """In-process tool table for the gesture engine.
 
@@ -186,6 +256,12 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
+    # TEMPORARY instrumentation for the sparse-keyframe investigation; the
+    # raw measurements are always collected (ns-scale cost), the flag only
+    # gates the extra log lines.
+    profile = bool(cfg.get("debug", {}).get("profile", False))
+    prof = _Prof(cam)
+
     log.info("gesture engine started")
     frames, t_report = 0, time.monotonic()
     palm_log_state = {"t": 0.0}
@@ -195,12 +271,27 @@ def main() -> int:
     }
     try:
         while running:
+            t_pre_read = time.monotonic()
             frame = cam.read()
             if frame is None:
                 continue
             now = time.monotonic()
+            wait_ms = (now - t_pre_read) * 1000.0
+            age_ms = (now - cam.last_capture_ts) * 1000.0
             landmarks = tracker.process(frame)
+            gap_ms = prof.frame(wait_ms, age_ms, tracker.last_timing, now)
             act = machine.update(landmarks, now)
+
+            if profile and act.state in ("palm", "grace", "edge-drag"):
+                t = tracker.last_timing
+                log.info(
+                    "pf seq=%d age=%.1f wait=%.1f cvt=%.1f det=%.1f hand=%d "
+                    "recov=%d gap=%s state=%s",
+                    cam.last_seq, age_ms, wait_ms, t.get("cvt_ms", 0.0),
+                    t.get("det_ms", 0.0), int(t.get("detected", False)),
+                    int(t.get("recovered", False)),
+                    f"{gap_ms:.1f}" if gap_ms is not None else "-", act.state,
+                )
 
             pos = None
             if act.cursor is not None:
@@ -286,6 +377,10 @@ def main() -> int:
                     counters["palm_frames"], counters["hand_lost"], counters["fired"],
                     counters["edge_drag_released"], counters["edge_drag_cancelled"], rej_str,
                 )
+                if profile:
+                    log.info(prof.report(consumed=frames))
+                else:
+                    prof.reset()
                 frames, t_report = 0, now
                 counters = {
                     "palm_frames": 0, "hand_lost": 0, "fired": 0, "rej": {},
