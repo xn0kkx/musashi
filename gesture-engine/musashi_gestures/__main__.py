@@ -110,6 +110,7 @@ class _Prof:
     def __init__(self, cam):
         self._cam = cam
         self._last_seq = 0
+        self._last_reopens = 0
         self._last_detect_t = None
         self.reset()
 
@@ -153,6 +154,8 @@ class _Prof:
         produced_total, read_ms = self._cam.take_producer_stats()
         produced = produced_total - self._last_seq
         self._last_seq = produced_total
+        reopens = self._cam.reopens - self._last_reopens
+        self._last_reopens = self._cam.reopens
         drop = 100.0 * (1.0 - consumed / produced) if produced else 0.0
         line = (
             f"prof produced={produced} consumed={consumed} drop={drop:.0f}% "
@@ -160,7 +163,7 @@ class _Prof:
             f"age={self._pct(self._age)} cvt={self._pct(self._cvt)} "
             f"det_hand={self._pct(self._det_hand)} det_none={self._pct(self._det_none)} "
             f"none={self._none}/{self._total} recov={self._recovered} "
-            f"gap={self._pct(self._gap)}"
+            f"reopen={reopens} gap={self._pct(self._gap)}"
         )
         self.reset()
         return line
