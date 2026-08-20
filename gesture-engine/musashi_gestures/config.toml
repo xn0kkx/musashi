@@ -110,10 +110,13 @@ slot        = 1          # SAME slot as the legacy TouchSequencer — shared on
                           # active at a time by construction (see __main__.py)
 rate_hz     = 120
 mode        = "extrapolate"  # "extrapolate" | "interpolate" | "off"
-max_predict = 0.10       # dead-reckoning ceiling for ONE missed camera frame
-                          # (~0.066s expected gap @ 15fps) — see
-                          # touchstream.py's module docstring for why this is
-                          # much larger than a touchscreen-rate resampler's
+max_predict = 0.15       # dead-reckoning ceiling — kept just above
+                          # edge_swipe's release_grace/lost_grace (0.13s) so
+                          # the touch keeps gliding for as long as a drag is
+                          # still considered "in flight" instead of freezing
+                          # mid-gesture on a real hand-tracking gap (which
+                          # routinely runs past the ~0.066s nominal @15fps —
+                          # see touchstream.py's module docstring)
 min_delta   = 0.0005      # dedupe threshold (~0.3px logical @ 960x540)
 watchdog    = 1.5         # seconds without an update() before releasing the
                           # contact on its own (stuck camera loop, exception)

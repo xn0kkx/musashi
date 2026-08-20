@@ -96,6 +96,43 @@ def test_never_emits_after_end():
         streamer.stop()
 
 
+def test_extrapolation_bridges_sparse_keyframe_gaps():
+    # Regression test for a real-VM finding: hand-tracking gaps routinely run
+    # well past the nominal ~66ms/frame (motion blur, brief confidence drops)
+    # — up to release_grace/lost_grace (0.13s default) before EdgeDragTracker
+    # gives up on the drag. With too tight a max_predict, the touch freezes
+    # (renders the identical point, gets deduped) for the remainder of every
+    # such gap: on screen this looked like the dragged panel gliding, then
+    # stopping dead, then jumping — exactly the "stutters mid-gesture"
+    # complaint that motivated raising the default from 0.10s to 0.15s.
+    touch = _FakeTouch()
+    streamer = TouchStreamer(
+        touch, {"rate_hz": 120, "mode": "extrapolate", "max_predict": 0.15}
+    )
+    try:
+        t0 = time.monotonic()
+        streamer.begin(0.5, 0.99, t0)
+        # Sparse keyframes ~120ms apart (comfortably under release_grace's
+        # 0.13s default, comfortably over the ~66ms nominal camera gap).
+        gap = 0.12
+        for i in range(1, 6):
+            time.sleep(gap)
+            streamer.update(0.5, 0.99 - i * 0.05, time.monotonic())
+        time.sleep(0.05)
+        streamer.end(time.monotonic())
+        time.sleep(0.05)
+        ys = [y for (_slot, _x, y) in touch.moves]
+        # A frozen stretch shows up as a run of consecutive *duplicate*
+        # values inside `moves` — held ticks are deduped before ever
+        # reaching touch.move(), so any duplicate here means the point was
+        # re-rendered (extrapolation kept advancing) rather than frozen.
+        assert len(ys) >= 40, f"too few moves for a ~0.65s drag: {len(ys)}"
+        assert len(set(ys)) == len(ys), "duplicate consecutive Y — a frozen stretch got through"
+        print(f"test_extrapolation_bridges_sparse_keyframe_gaps: OK ({len(ys)} moves)")
+    finally:
+        streamer.stop()
+
+
 def test_holds_position_when_source_stalls():
     touch = _FakeTouch()
     streamer = TouchStreamer(
@@ -163,6 +200,7 @@ if __name__ == "__main__":
     test_emits_more_moves_than_keyframes()
     test_monotonic_y_for_up_drag()
     test_never_emits_after_end()
+    test_extrapolation_bridges_sparse_keyframe_gaps()
     test_holds_position_when_source_stalls()
     test_watchdog_releases_stuck_contact()
     test_begin_resets_stats()

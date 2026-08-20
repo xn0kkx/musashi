@@ -19,13 +19,23 @@ consecutive keyframes are ~66ms apart, not ~8-16ms — so by the time a new
 `update()` lands, `now` is already at or past that keyframe's own timestamp:
 there is essentially never a "future" sample to interpolate towards, only a
 "most recent" one to extrapolate from. `max_predict` here is a dead-reckoning
-ceiling sized to comfortably cover one full camera frame interval (default
-0.10s against an expected ~0.066s gap), not a sub-frame smoothing constant —
-too small and most of each segment renders as a frozen point instead of
-continuous motion (measured: a 16ms ceiling against a 66ms source produced
-one interpolated point plus one clamped-extrapolation point per keyframe,
-then held flat for the rest of the gap). The watchdog is the backstop for a
-truly stalled source; `max_predict` only bounds a single missed/delayed frame.
+ceiling, not a sub-frame smoothing constant — too small and most of each
+segment renders as a frozen point instead of continuous motion (measured: a
+16ms ceiling against a 66ms source produced one interpolated point plus one
+clamped-extrapolation point per keyframe, then held flat for the rest of the
+gap).
+
+In practice keyframe gaps run well past the nominal 66ms too — real hand
+tracking drops frames far more than the raw camera fps suggests (motion
+blur, the hand briefly leaving MediaPipe's confidence threshold), and
+EdgeDragTracker already tolerates gaps up to `lost_grace`/`release_grace`
+(0.13s default) before giving up on the drag. If `max_predict` freezes
+sooner than that, the touch visibly stutters — glides, stops dead, jumps —
+for every gap the tracker was willing to ride out. So the default here
+(0.15s) is set to just clear those grace windows: the stream keeps
+extrapolating for as long as the tracker itself would still call the drag
+"in flight", and only the watchdog (a genuinely stalled source, well beyond
+any tolerated tracking gap) is left to hard-stop it.
 
 This is deliberately a separate module from TouchSequencer: the sequencer
 plays back a fixed, pre-recorded path (tap/long-press/legacy swipe) with no
@@ -53,7 +63,7 @@ class TouchStreamer:
         self.slot = cfg.get("slot", 1)
         self.rate_hz = cfg.get("rate_hz", 120)
         self.mode = cfg.get("mode", "extrapolate")  # "extrapolate" | "interpolate" | "off"
-        self.max_predict = cfg.get("max_predict", 0.10)
+        self.max_predict = cfg.get("max_predict", 0.15)
         self.min_delta = cfg.get("min_delta", 0.0005)
         self.watchdog = cfg.get("watchdog", 1.5)
 
