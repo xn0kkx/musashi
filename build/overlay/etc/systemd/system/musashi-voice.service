@@ -1,0 +1,59 @@
+# MusashiOS voice loop — SHIPPED DISABLED, ON PURPOSE. Do not `systemctl
+# enable` this yet; read why first.
+#
+# musashi-voice is a *push-to-talk* loop: it records for exactly as long as
+# something external says to. Today that something is a terminal key — Enter to
+# start, Enter to stop (musashi_voice/__main__.py:record_once). That is a
+# harness for a human at a console, and it is meaningless under systemd, which
+# has no console to press Enter at.
+#
+# The real trigger is a hand gesture in the guest, which will set the very same
+# threading.Event that the second Enter sets today. That gesture does not exist:
+# it needs a new transition in GestureStateMachine and it was explicitly out of
+# scope for the change that moved voice into this VM.
+#
+# So there are two honest options and one dishonest one. The dishonest one is
+# enabling this unit with some invented always-on activation — a wake word we
+# rejected, or an open microphone — which would have to be deleted the moment
+# the real PTT lands, and which would quietly discard the security property PTT
+# exists to provide (Plano Diretor §2.7: a second, non-audio factor; it is what
+# makes the speaker-replay attack class impossible by construction).
+#
+# The honest options are: run it in the foreground from an SSH session, which
+# is what you should do today —
+#
+#     ssh -p 2222 musashi@localhost
+#     /opt/gesture-engine/venv/bin/python -m musashi_voice
+#
+# — or, once the PTT gesture exists, enable this unit, because then the gesture
+# engine drives the record window over the effector and the process genuinely
+# has no reason to be attached to a terminal.
+#
+# When that day comes, the only change needed here should be dropping this
+# comment. The unit below is otherwise correct and ready.
+#
+#     systemctl enable --now musashi-voice
+#
+[Unit]
+Description=MusashiOS voice loop (STT -> intent -> effector -> TTS)
+# It speaks to the effector over /run/musashi/effector.sock, which that unit's
+# RuntimeDirectory= creates. Requires=, not just After=: with no socket there
+# is no capability layer to propose intents to, and the loop is pointless.
+After=musashi-effector.service
+Requires=musashi-effector.service
+
+[Service]
+User=musashi
+# Audio is reached through ALSA (the QEMU intel-hda card), so no Wayland is
+# needed. XDG_RUNTIME_DIR is set anyway to match musashi-effector.service and
+# to keep any library that expects it from guessing.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+# Whisper and Piper models are baked into the image; HOME only holds the
+# faster-whisper cache for a model that is not the configured default.
+Environment=HOME=/home/musashi
+ExecStart=/opt/gesture-engine/venv/bin/python -m musashi_voice
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

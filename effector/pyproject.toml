@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musashi-effector"
+version = "0.1.0"
+description = "MusashiOS capability daemon: validates proposed intents and owns the real effectors"
+requires-python = ">=3.11"
+# Deliberately empty. Two runtime dependencies exist and neither can come from
+# pip:
+#   musashi-gestures  — installed from a local path into the same venv (see
+#                       build/chroot-setup.sh); listing it here would send pip
+#                       to PyPI looking for a package that does not exist.
+#   PyGObject (gi)    — comes from the distro (python3-gi + gir1.2-glib-2.0),
+#                       not from a wheel; the venv is created with
+#                       --system-site-packages so it is importable.
+# Both are imported lazily, so the package still imports (and its tests still
+# run) on a bare host without either.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["musashi_effector*"]
+
+[tool.setuptools.package-data]
+musashi_effector = ["effector.toml"]

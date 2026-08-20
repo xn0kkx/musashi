@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fast path for iterating on gesture-engine/ Python code: patches the
-# existing qcow2 in place via NBD instead of a full debootstrap rebuild.
+# Fast path for iterating on gesture-engine/, effector/ and voice/ Python code:
+# patches the existing qcow2 in place via NBD instead of a full debootstrap
+# rebuild.
 #   ~1 min vs ~45 min for ./build/build-image.sh
 #
 #   sudo ./build/update-gesture-engine.sh            # reinstall musashi-gestures only
@@ -53,9 +54,18 @@ qemu-nbd --connect="$NBD" "$IMG"
 sleep 1
 mount "$NBD" "$MNT"
 
-echo "==> syncing gesture-engine sources"
-rm -rf "$MNT/opt/musashi/gesture-engine"
+echo "==> syncing gesture-engine + effector + voice sources"
+rm -rf "$MNT/opt/musashi/gesture-engine" "$MNT/opt/musashi/effector" "$MNT/opt/musashi/voice"
 cp -a "$REPO/gesture-engine" "$MNT/opt/musashi/"
+cp -a "$REPO/effector" "$MNT/opt/musashi/"
+cp -a "$REPO/voice" "$MNT/opt/musashi/"
+# WARNING: this clobbers any in-guest edits to config.toml on every run
+# (docs/GESTURES.md:69-72). /etc/musashi/effector.toml is deliberately NOT
+# copied here — it holds the app.launch allowlist, and a code-iteration cycle
+# must never be able to silently reset a security boundary. Create it once
+# from effector/musashi_effector/effector.toml (build-image.sh does).
+# /etc/musashi/voice.toml is likewise not copied here: it lives in
+# build/overlay/, so it is resynced by --overlay and left alone otherwise.
 cp "$REPO/gesture-engine/musashi_gestures/config.toml" "$MNT/etc/musashi/config.toml"
 
 if [[ "$OVERLAY" == 1 ]]; then
@@ -75,6 +85,12 @@ if [[ "$DEPS" == 1 ]]; then
 else
     chroot "$MNT" /opt/gesture-engine/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps /opt/musashi/gesture-engine
 fi
+chroot "$MNT" /opt/gesture-engine/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps /opt/musashi/effector
+# --no-deps even under --deps: voice's audio extra drags torch, faster-whisper
+# and onnxruntime, which is a multi-GB download that defeats the whole point of
+# a "~1 min" iteration script. Those are installed once by chroot-setup.sh; if
+# voice/pyproject.toml's dependencies actually change, do a full rebuild.
+chroot "$MNT" /opt/gesture-engine/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps /opt/musashi/voice
 
 if [[ "$OVERLAY" == 1 ]]; then
     chroot "$MNT" dconf update

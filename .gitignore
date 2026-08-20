@@ -10,12 +10,18 @@ logs/
 .claude/
 
 # Python (note: does NOT match the top-level build/ source dir — patterns
-# below are anchored under gesture-engine/ specifically)
+# below are anchored under the Python package dirs specifically)
 __pycache__/
 *.py[cod]
 gesture-engine/**/*.egg-info/
 gesture-engine/build/
 gesture-engine/dist/
+effector/**/*.egg-info/
+effector/build/
+effector/dist/
+voice/**/*.egg-info/
+voice/build/
+voice/dist/
 .venv/
 venv/
 

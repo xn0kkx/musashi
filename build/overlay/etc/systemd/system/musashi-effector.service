@@ -1,0 +1,32 @@
+# MusashiOS capability daemon: validates proposed intents (JSON-lines) and owns
+# the real effectors. Unlike gesture-engine.service this unit ships ENABLED —
+# it needs no webcam and no preview window.
+#
+# It listens on two sockets at once over one registry: AF_VSOCK for the host,
+# and /run/musashi/effector.sock for musashi-voice, which now runs inside this
+# VM. RuntimeDirectory=musashi is what makes the second one possible — /run is
+# root-owned and this unit runs as musashi, so systemd creates and chowns
+# /run/musashi (and removes it on stop).
+#
+# It does need the Phosh session's Wayland/D-Bus environment: app.launch hands
+# a .desktop entry to Gio, and the app it spawns has to find a compositor.
+# There is no systemd user session on this image (the session starts from
+# musashi's login shell — see overlay/home/musashi/.bash_profile), so the
+# environment is pinned here instead of inherited. If the session's socket
+# ever stops being wayland-0, this is the line to fix.
+[Unit]
+Description=MusashiOS effector (intent capability daemon)
+After=multi-user.target
+
+[Service]
+User=musashi
+RuntimeDirectory=musashi
+RuntimeDirectoryMode=0750
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/opt/gesture-engine/venv/bin/python -m musashi_effector
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

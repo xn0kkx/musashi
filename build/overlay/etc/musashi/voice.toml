@@ -1,0 +1,51 @@
+# musashi-voice, GUEST side. Overrides the packaged voice.toml section by
+# section (the layer order is: packaged -> this file -> ~/.config -> env).
+#
+# This file exists because the voice loop moved into the VM. Everything in it
+# is a property of *this machine*, not of a user: there is no GPU here, the
+# effector is a local process rather than a host across vsock, and the Piper
+# voice lives at a fixed path baked in by build/chroot-setup.sh.
+#
+# Unlike /etc/musashi/config.toml this file is shipped via build/overlay/, so
+# build/update-gesture-engine.sh only rewrites it with --overlay, never on a
+# plain code-iteration run.
+
+[vsock]
+# Same VM, so no vsock: talk to the unix socket musashi-effector opens next to
+# its vsock listener (effector.toml [server].unix_path). Both are served by the
+# same registry under the same dispatch lock.
+unix_path = "/run/musashi/effector.sock"
+
+[audio]
+# QEMU gives this guest one intel-hda card with an hda-duplex codec, fed by the
+# host's PipeWire (see run.sh). PortAudio reaches it through ALSA directly —
+# there is no systemd user session in this image, so no PipeWire daemon runs
+# here and none is needed. "" = ALSA default, which is that single card.
+input_device = ""
+
+[stt]
+# `small` int8 on 4 vCPU, not large-v3-turbo: there is no GPU in this VM and
+# never will be (GPU passthrough was explicitly ruled out). small is the
+# smallest faster-whisper model whose PT-BR is actually usable — tiny/base
+# mangle exactly the short imperative commands this grammar is made of, and a
+# misheard command costs more than the latency it saves.
+#
+# It is the RAM, not the CPU, that is tight: small/int8 peaks around 700 MB in
+# a 4 GB VM that also runs Phosh and MediaPipe. If the VM starts swapping, drop
+# to base before dropping to tiny:
+#   MUSASHI_VOICE_STT_MODEL=base python -m musashi_voice
+#
+# A local directory, not the name "small": build/chroot-setup.sh snapshots the
+# weights into the image so first boot needs no network, and a bare name would
+# send faster-whisper to Hugging Face and to a per-user cache this service
+# (running as musashi, downloaded as root) could not see.
+model = "/opt/musashi/whisper/small"
+device = "cpu"          # no CUDA in this guest; skip the probe entirely
+compute_type = "int8"
+language = "pt"
+
+[tts]
+# Downloaded into the image by build/chroot-setup.sh, so the guest is offline-
+# capable from first boot.
+model = "/opt/musashi/piper/pt_BR-faber-medium.onnx"
+locale = "pt"

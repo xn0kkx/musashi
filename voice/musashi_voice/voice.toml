@@ -1,0 +1,62 @@
+# musashi-voice defaults, tuned for running on the HOST against the VM.
+#
+# Overridden section-by-section by /etc/musashi/voice.toml, then by
+# ~/.config/musashi/voice.toml, then key-by-key by environment variables named
+# MUSASHI_VOICE_<SECTION>_<KEY> (e.g. MUSASHI_VOICE_STT_MODEL=medium,
+# MUSASHI_VOICE_VSOCK_CID=4).
+#
+# The same package now also runs INSIDE the guest, where /etc/musashi/voice.toml
+# (shipped by build/overlay) flips the transport to a local unix socket and the
+# STT model to a CPU-sized one. Nothing here is guest-specific, so a host
+# checkout behaves exactly as it always did.
+
+[vsock]
+# The guest CID set by run.sh (-device vhost-vsock-pci,guest-cid=3) and the
+# port musashi-effector listens on (effector.toml [server].vsock_port).
+cid = 3
+port = 5000
+timeout_s = 5.0
+# When non-empty this wins over cid/port: connect to the effector's local unix
+# socket instead of crossing the VM boundary. Empty on the host; set to
+# /run/musashi/effector.sock by the guest's /etc/musashi/voice.toml.
+unix_path = ""
+
+[audio]
+samplerate = 16000          # what Whisper and Silero both want; do not change
+channels = 1
+blocksize = 512
+input_device = ""           # "" = system default; else a sounddevice name/index
+max_seconds = 30.0          # hard stop, so a stuck PTT cannot record forever
+
+[vad]
+# Silero VAD only trims silence off the ends here — with push-to-talk the end
+# of turn is decided by the human, not by the VAD.
+enabled = true
+threshold = 0.5
+pad_ms = 150                # keep this much audio around detected speech
+
+[stt]
+model = "large-v3-turbo"    # any faster-whisper name or a local model dir
+device = "auto"             # auto | cuda | cpu
+compute_type = "auto"       # auto -> int8_float16 on cuda, int8 on cpu
+language = "pt"             # pt | en | auto
+beam_size = 1               # greedy; latency budget is 900 ms end to end
+vad_filter = true
+
+[intent]
+# rapidfuzz score (0-100) a phrase must reach to be accepted. Below this it is
+# a MISS: logged, spoken back as "não entendi", and — later — handed to the
+# local LLM through the resolve_intent() fallback seam.
+# 75 sits in the measured gap between the worst real command (85.0) and the
+# best unrelated sentence (62.1); see Grammar.match()'s docstring.
+min_score = 75.0
+locales = ["pt", "en"]
+
+[tts]
+enabled = true
+# Absolute path to a Piper voice, e.g.
+#   ~/.local/share/piper/pt_BR-faber-medium.onnx
+# The matching .onnx.json must sit next to it. See voice/README.md for where
+# to download it; nothing is fetched automatically.
+model = ""
+locale = "pt"

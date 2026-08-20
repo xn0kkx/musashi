@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musashi-voice"
+version = "0.1.0"
+description = "MusashiOS voice loop: capture -> VAD -> STT -> intent -> effector -> TTS"
+requires-python = ">=3.11"
+
+# This package runs in TWO places, from one set of sources:
+#
+#   host   against the VM over vsock (cid 3, port 5000) — the original V1 use,
+#          unchanged, GPU if one is present.
+#   guest  inside the image, against the effector's local unix socket, CPU
+#          only. build/chroot-setup.sh installs it into the shared venv.
+#
+# Nothing below is conditional on which: the difference is entirely config
+# (/etc/musashi/voice.toml in the guest). What the guest build *does* do is
+# install torch from PyTorch's CPU-only index first, so the `audio` extra below
+# resolves without pulling ~2.5 GB of nvidia-* wheels into a VM with no GPU.
+#
+# Everything except rapidfuzz is imported lazily, at first use, so that:
+#   - the unit tests run on a bare checkout with no torch and no audio device;
+#   - a missing TTS model degrades to a printed line instead of a crash;
+#   - `python -m musashi_voice --text "abrir terminal"` works with no mic.
+dependencies = [
+    "rapidfuzz>=3.6",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# The real loop. Split out so CI / a laptop without CUDA can install the core
+# and still run every test.
+audio = [
+    "sounddevice>=0.4.6",
+    "silero-vad>=5.1",
+    "faster-whisper>=1.0",
+    "piper-tts>=1.2",
+]
+
+[project.scripts]
+musashi-voice = "musashi_voice.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["musashi_voice*"]
+
+[tool.setuptools.package-data]
+musashi_voice = ["voice.toml"]

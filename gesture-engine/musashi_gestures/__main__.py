@@ -16,6 +16,7 @@ from .camera import Camera
 from .gestures import GestureStateMachine
 from .hands import HandTracker
 from .injector import PointerInjector, TouchInjector
+from .intents import Arg, Intent, Registry, ToolClass
 from .sequencer import TouchSequencer
 from .smoothing import PointFilter
 
@@ -94,6 +95,48 @@ def _log_episode(act) -> None:
     )
 
 
+def _build_gesture_registry(touch, sequencer, machine) -> Registry:
+    """In-process tool table for the gesture engine.
+
+    Only *discrete* gestures are dispatched through it. Cursor motion and the
+    live pinch touch stay inline in the loop on purpose: they are a continuous
+    input stream at camera framerate, not proposable commands, and running
+    them through per-frame schema validation would cost time in the hot loop
+    for no safety gain. `Actions` is still the state machine's output — it
+    just stopped being the dispatch contract.
+
+    Coordinates are not range-checked here (unlike the effector's `ui.tap`):
+    they come from the local state machine, and `injector._clamp` already
+    handles MediaPipe landmarks that stray slightly outside [0, 1]. Adding
+    bounds here would silently drop otherwise-valid long presses.
+    """
+    reg = Registry()
+
+    def _swipe(dir: str):
+        # Belt-and-braces: guarantee the synthesized swipe (slot 1) is never
+        # joined by a stuck live-touch contact (slot 0) — a no-op if slot 0
+        # is already up.
+        touch.up(0)
+        sequencer.edge_swipe(dir)
+        return dir
+
+    def _long_press(x: float, y: float):
+        sequencer.long_press(x, y, machine.long_press_hold)
+        return None
+
+    reg.register(
+        "shell.swipe", ToolClass.EFFECT,
+        {"dir": Arg(str, choices=("up", "down", "left", "right"))},
+        _swipe, doc="Edge swipe: home / notifications / app pages.",
+    )
+    reg.register(
+        "ui.long_press", ToolClass.EFFECT,
+        {"x": Arg(float), "y": Arg(float)},
+        _long_press, doc="Long press (secondary action) at a normalized point.",
+    )
+    return reg
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="musashi-gestures")
     parser.add_argument("--no-overlay", action="store_true", help="disable preview window")
@@ -113,6 +156,8 @@ def main() -> int:
     sequencer = TouchSequencer(touch, **cfg["touch"])
     machine = GestureStateMachine(cfg, sequencer)
     smoother = PointFilter(**cfg["smoothing"])
+    registry = _build_gesture_registry(touch, sequencer, machine)
+    log.info("intent registry: %s", registry.names())
 
     overlay = None
     if cfg["overlay"]["enabled"] and not args.no_overlay:
@@ -155,17 +200,24 @@ def main() -> int:
             elif act.touch_at is not None and machine.touch_down:
                 touch.move(0, *(pos if pos is not None else act.touch_at))
 
+            # Discrete gestures become Intents and go through the registry;
+            # the registry, not this loop, decides whether they run.
+            proposals = []
             if act.long_press:
-                sequencer.long_press(*(pos if pos is not None else act.touch_at), machine.long_press_hold)
-                log.debug("long press")
+                lx, ly = pos if pos is not None else act.touch_at
+                proposals.append(Intent("ui.long_press", {"x": lx, "y": ly}, source="gesture"))
             if act.swipe:
-                # Belt-and-braces: guarantee the synthesized swipe (slot 1)
-                # is never joined by a stuck live-touch contact (slot 0) —
-                # a no-op if slot 0 is already up.
-                touch.up(0)
-                sequencer.edge_swipe(act.swipe)
-                log.info("swipe %s", act.swipe)
-                counters["fired"] += 1
+                proposals.append(Intent("shell.swipe", {"dir": act.swipe}, source="gesture"))
+
+            for intent in proposals:
+                res = registry.dispatch(intent)
+                if not res.ok:
+                    log.warning("intent rejected: %s — %s", intent, res.error)
+                elif intent.name == "shell.swipe":
+                    log.info("swipe %s", intent.args["dir"])
+                    counters["fired"] += 1
+                else:
+                    log.debug("long press")
 
             if act.state in ("palm", "grace"):
                 counters["palm_frames"] += 1

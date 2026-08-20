@@ -1,0 +1,30 @@
+# musashi-effector defaults. Overridden section-by-section by
+# /etc/musashi/effector.toml (same two-layer tomllib merge the gesture engine
+# uses for config.toml).
+#
+# NOTE: this is deliberately a *separate file* from /etc/musashi/config.toml.
+# build/update-gesture-engine.sh overwrites config.toml on every run
+# (docs/GESTURES.md:69-72); keeping the capability allowlist out of that file
+# means a routine code-iteration cycle can never silently widen or reset it.
+
+[server]
+# AF_VSOCK port the daemon listens on. The host connects with
+# VSOCK-CONNECT:<guest-cid>:<port>; guest-cid is set by run.sh.
+vsock_port = 5000
+
+# Local unix socket served *in addition to* vsock, for clients inside this same
+# VM — musashi-voice, now that the voice loop runs in the guest. Same protocol,
+# same registry, same dispatch lock; the only difference is who can reach it.
+# /run/musashi is created by RuntimeDirectory= in musashi-effector.service and
+# is owned by the musashi user; the daemon mkdir -p's it when run by hand.
+# Set to "" to serve vsock only.
+unix_path = "/run/musashi/effector.sock"
+
+[apps]
+# The curated allowlist for app.launch / app.close. A .desktop id that is not
+# in this list is rejected by the Registry before any handler runs — the
+# caller never gets to pass a free-form string through to Gio.
+allow = [
+    "foot.desktop",
+    "org.gnome.Calculator.desktop",
+]

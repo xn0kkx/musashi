@@ -15,7 +15,11 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$REPO/out"
 MNT="$OUT/mnt"
 RAW="$OUT/musashi.raw"
-IMG_SIZE=6G
+# The raw image is sparse and converted to qcow2 at the end, so headroom is
+# free. Raised from 6G when the voice stack moved into the guest: CPU torch,
+# onnxruntime, the Whisper small weights and the Piper voice add ~1.5G on top
+# of a tree that was already using ~5G of the old 6G.
+IMG_SIZE=12G
 SUITE=trixie
 MIRROR=http://deb.debian.org/debian
 
@@ -51,12 +55,18 @@ EOF
 echo "==> applying overlay"
 cp -a "$REPO/build/overlay/." "$MNT/"
 
-echo "==> copying gesture-engine sources"
+echo "==> copying gesture-engine + effector + voice sources"
 mkdir -p "$MNT/opt/musashi"
 cp -a "$REPO/gesture-engine" "$MNT/opt/musashi/"
-# Editable copy of the config inside the guest (overrides packaged defaults)
+cp -a "$REPO/effector" "$MNT/opt/musashi/"
+cp -a "$REPO/voice" "$MNT/opt/musashi/"
+# Editable copies of the configs inside the guest (override packaged defaults).
+# /etc/musashi/voice.toml is NOT copied here — it ships via build/overlay/,
+# because unlike these two its guest values differ from the packaged host ones
+# (local socket, CPU model, baked-in model paths).
 mkdir -p "$MNT/etc/musashi"
 cp "$REPO/gesture-engine/musashi_gestures/config.toml" "$MNT/etc/musashi/config.toml"
+cp "$REPO/effector/musashi_effector/effector.toml" "$MNT/etc/musashi/effector.toml"
 
 echo "==> chroot setup"
 cp /etc/resolv.conf "$MNT/etc/resolv.conf"

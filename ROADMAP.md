@@ -1,6 +1,6 @@
 # Roadmap
 
-MusashiOS project state (old name: HaikuOS). Updated 2026-08-19.
+MusashiOS project state (old name: HaikuOS). Updated 2026-08-20.
 
 The detailed pivot roadmap (sprints S0–S14 of the main path and the parallel
 空 KŪ track) lives in the **Plano Diretor** (Obsidian, `1-Projects/MusashiOS/
@@ -46,6 +46,99 @@ this repository.
   `loginctl`. The smoke test was headless with `--no-cam` — it doesn't
   cover the gesture experience with a real camera, which was validated
   below.
+
+## Done — intent/effector capability layer (V0, 2026-08-19)
+
+Before voice could propose anything, the gesture engine needed a real
+dispatch contract instead of the `if act.swipe: ...` chain it had:
+
+- **`gesture-engine/musashi_gestures/intents.py`**: `Intent(name, args,
+  source, confidence)`, `Registry` with schema validation, and a mandatory
+  binary tool class — `QUERY` (free) or `EFFECT` (allowlisted, typed,
+  confirmation gate planned for later). `__main__.py`'s dispatch loop now
+  translates `Actions` into `Intent`s and hands them to a registry instead
+  of branching on them directly; gesture behavior is unchanged.
+- **`effector/` (new package)**: `musashi-effector`, a daemon that owns the
+  only reachable copy of the real actuators (`app.launch`/`app.close` via
+  `Gio.DesktopAppInfo`, PID-tracked so `app.close` is deterministic;
+  `shell.swipe`/`ui.tap` reusing the existing `TouchSequencer`/
+  `TouchInjector`). It listens on **both** `AF_VSOCK` (guest CID 3, port
+  5000) and a local `AF_UNIX` socket (`/run/musashi/effector.sock`)
+  simultaneously, sharing one registry and one dispatch lock — proven by a
+  dedicated test with a negative control
+  (`effector/tests/test_dual_listener_lock.py`) showing two *independently*
+  locked servers really do race, so the shared-lock fix is provably load
+  bearing, not just plausible.
+- The `app.launch`/`app.close` allowlist lives in
+  `/etc/musashi/effector.toml`, a file `update-gesture-engine.sh`
+  deliberately never overwrites (unlike `config.toml`) — a capability
+  boundary shouldn't reset on a routine code-iteration sync.
+- **Validated live** against a real rebuilt VM: `sys.tools` returns the
+  schema table; `app.launch`/`app.close` open and close real GUI apps
+  (`foot`, `gnome-calculator`) inside the guest; an app id outside the
+  allowlist is rejected by the daemon, not the caller; malformed JSON on the
+  wire doesn't kill the connection.
+
+## Done — voice MVP (2026-08-19/20)
+
+A working push-to-talk voice loop, end to end, validated on real hardware —
+explicitly a proof of concept for the intent/effector contract, not the
+Plano Diretor's S3–S6 production voice loop (no wake word, no AEC, no
+streaming, no web surface; push-to-talk is a terminal keypress, not the
+gesture it will eventually be).
+
+- **`voice/` (new package)**: capture (`sounddevice`) + Silero VAD →
+  `faster-whisper` STT → a fuzzy-match grammar (`rapidfuzz`) built **at
+  runtime** from the effector's own `sys.tools` table (a newly allowlisted
+  app becomes voice-addressable with no client-side change) → dispatch to
+  `musashi-effector` → Piper TTS confirmation. Per-stage latency
+  instrumentation from day one, per the Plano Diretor's 900ms budget.
+  `resolve_intent()` already has the seam for a local-LLM fallback on
+  grammar misses (`fallback: Callable[[str, Grammar], Intent | None]`,
+  contract pinned by 5 tests) — not implemented yet, deliberately out of
+  scope for this pass.
+- **Two supported arrangements, one codebase**: originally host-side (mic +
+  GPU on the host, effector reached over `vsock`); now **also** fully
+  inside the guest (QEMU passes the host mic/speaker through as an
+  `intel-hda` card via `-audiodev pipewire` + `hda-duplex`, Whisper `small`
+  + Piper `pt_BR-faber-medium` run on the guest's CPU, effector reached
+  over the local unix socket). Only `[vsock]`/`[audio]` config differs
+  between the two; `effector/musashi_effector/server.py` serving both
+  transports at once is what made adding the second arrangement free on
+  the effector side.
+- Guest image grew from a 6G to a 12G sparse raw image
+  (`build/build-image.sh`) to fit the baked-in models — CPU-only `torch`
+  (no CUDA wheels, there's no GPU passthrough), Whisper `small` snapshot at
+  `/opt/musashi/whisper/small`, Piper voice at `/opt/musashi/piper/` — so
+  the guest is voice-capable offline from first boot.
+- `musashi-voice.service` ships **disabled**, on purpose: without a real
+  push-to-talk gesture, any automatic activation would discard the
+  non-audio-second-factor security property PTT exists to provide (Plano
+  Diretor §2.7 — a command replayed from a speaker must never execute).
+- **Validated live** on the rebuilt VM, real hardware, no mocks: "abrir a
+  calculadora" / "fechar a calculadora" launched and closed
+  `gnome-calculator` for real, with a spoken Portuguese confirmation played
+  back through the host's actual speakers. Steady-state intent dispatch
+  over the unix socket measured at ~50ms (the Plano Diretor's 900ms budget
+  is for the whole turn, not just this hop). A cold-boot run showed ~1s
+  dispatch and load average 2.7 on the 4-vCPU guest — MediaPipe's
+  continuous 14fps hand tracking competes with STT/TTS for the same CPUs;
+  worth remembering before reading any single latency number as steady
+  state.
+
+## Design note — LLM inference moves off the core (Plano Diretor, 2026-08-19)
+
+Not implemented in this repo yet — a Plano Diretor architecture revision
+worth recording here because it changes what "S2 — 火 KA" means going
+forward. The core no longer hosts the GPU or the local LLM directly: 火 KA
+becomes a separate, stateless, directly-connected inference node (10GbE or
+Thunderbolt, not the surfaces' LAN), reached by the core's router over an
+OpenAI-compatible API (vLLM/llama.cpp). STT/TTS stay on the core (light,
+latency-critical). Rationale and the updated topology, budget, and roadmap
+entries are in the Plano Diretor §2.2/§2.3/§2.4/§4/§7.1 — the short version
+is that a core carrying state *and* a GPU is a worse single point of
+failure than a core carrying state alone; separating them turns a GPU
+driver hang into an availability blip instead of a state-loss incident.
 
 ## Fixed — swipe gestures barely ever fired
 
@@ -100,9 +193,13 @@ Diretor):
 
 - **S0–S2 (Phase 0 — Foundation)**: split the image into `musashi-core` and
   `musashi-surface`; PREEMPT_RT kernel; privacy state/classification
-  skeleton (`水 SUI`) **before** any LLM; local inference (`火 KA`).
+  skeleton (`水 SUI`) **before** any LLM; a separate inference node (`火
+  KA`, see the design note above) reached over a direct link.
 - **S3–S6 (Phase 1 — voice loop)**: capture + AEC, streaming STT/TTS, first
-  web surface, room arbitration across multiple devices.
+  web surface, room arbitration across multiple devices. **Not started** —
+  the voice MVP above proves the intent/effector contract works, but it's a
+  terminal-triggered, non-streaming, single-device proof of concept, not
+  this phase.
 - **S7–S10 (Phase 2 — multi-LLM router)**: default-deny privacy policy,
   provider adapters (Claude API and others), typed tool calling, **red-team
   the system itself** (mandatory gate before real data).
