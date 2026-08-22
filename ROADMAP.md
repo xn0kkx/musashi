@@ -196,6 +196,76 @@ the systemd graph, not of the Python code paths the tests exercise):
   the full graph walkthrough); confirmed with a real `systemctl reboot`
   inside the guest, not just `systemctl start`.
 
+## Done — host-side LLM voice assistant (2026-08-21)
+
+The grammar-miss seam the voice MVP shipped (`resolve_intent(..., fallback)`)
+finally has something behind it — but as a **separate, parallel seam**, because
+an agentic LLM does not fit the single-shot `Intent | None` the fallback
+promises. `intent.py` is untouched (its 5 contract tests still pass); a new
+`assistant` seam on `VoiceLoop` takes the raw transcript when the grammar and
+the fallback both decline. A prototype of the Plano Diretor's S7–S10 multi-LLM
+router, validated end-to-end **directly on the host (no VM)** against a real
+uncensored model, real shell, and real web.
+
+- **`voice/musashi_voice/assistant.py`** — `OllamaClient` (streaming
+  `/api/chat`) + `LlmAssistant`, a multi-turn tool-call loop. Tool definitions
+  are derived from the effector's live `Registry.describe()` table **plus** the
+  web tools — one source, no drift. `shell.exec`/`app.*` are proposed to the
+  effector (the sole authority — the agent never validates, per §2.7);
+  `web.search`/`web.fetch` run in-process because QUERY has no side effects.
+- **`voice/musashi_voice/webtools.py`** — `web.search` (ddgs), `web.fetch`
+  (requests + trafilatura). QUERY, free to call.
+- **`voice/musashi_voice/tts_kokoro.py`** — Kokoro-82M via **kokoro-onnx**
+  (NOT the torch `kokoro` package, which caps Python <3.13; host and guest are
+  both 3.13), sentence-streaming so a long reply starts speaking while the
+  model is still generating. `split_sentences()` is a pure, unit-tested
+  chunker. Selected by `[tts].engine`; Piper stays the default and the guest's
+  canned-confirmation voice.
+- **`effector` `shell.exec`** (`shell.py` + `registry.py`) — EFFECT,
+  `destructive=True`, free-form `command` (so the V1 grammar skips it; only the
+  LLM proposes it). OFF unless `[shell].enabled`; the daemon gained `--config
+  PATH` so the host profile enables it without writing into `/etc/musashi`.
+- **`run-host.sh`** + `docs/host-dev/` — one command brings up the effector
+  (host profile) and the `--wake` voice loop; example host configs live there.
+
+**Four things surfaced only by running it on real hardware**, none catchable by
+the unit suite:
+
+- **The abliterated model ignores Ollama's `think: false`** and emits `<think>`
+  reasoning inline — the TTS would read it aloud. Fixed with qwen3's textual
+  `/no_think` switch (the real latency lever) plus a streaming `strip_think`
+  filter as belt-and-suspenders.
+- **The smaller builds (8b/4b) emit tool calls as TEXT** (`<tools>{...}</tools>`)
+  instead of filling the structured `tool_calls` field, which reads as the
+  model hallucinating an answer. A rescue parser (`_extract_text_tool_calls`)
+  recovers them, which is what makes the fast, GPU-resident 8b usable for real
+  tool use.
+- **The model invented placeholder paths** (`ls /path/to/voice`) because it had
+  no idea where it was. The system prompt now states the working directory —
+  fixing tool use across *all* model sizes, not just the weak ones.
+- **Cold start dominated latency** (~24s to first token), not per-turn speed.
+  `LlmAssistant.warmup()` runs in a background thread at startup, in parallel
+  with the Whisper load, so the first spoken query hits a resident model.
+
+**Model choice, measured on this host (i5-11400H, 32G RAM, GTX 1650 4G):** the
+default is now `huihui_ai/qwen3-abliterated:8b` — mostly GPU-resident, ~6s per
+warm turn, and reliable at tool use with the four fixes above. `:30b-a3b` is
+more capable but runs 83% on CPU here (19G > 4G VRAM) at 13–45s; `:4b` is
+fastest (2–4s) but flaky on multi-step tool use. `temperature = 0.2` (low =
+deterministic commands). STT ran on CPU (the host's NVIDIA driver is too old
+for the installed torch's CUDA build), ~5s/transcription — a driver/`[stt].model`
+tuning matter, not a code issue.
+
+- 17 new host-side tests (`test_assistant.py`, `test_sentence_chunker.py`,
+  `test_tts_kokoro.py`) with fake Ollama/effector/speaker/audio — no network,
+  no model, no device. Full voice+effector suite: 114 passing.
+- **Guard-rails are deliberately NOT built yet.** The hooks are marked in place:
+  `Registry.gate(intent, spec)` (confirmation / prefix-allowlist for
+  `destructive`), `LlmAssistant._dispatch_tool` (proposer never validates), and
+  the persona/refusal `system_prompt` (a later layer, no architecture change).
+  Voice input still has no second, non-audio factor — `shell.exec` behind a
+  wake word means any sound that says "musashi" can run a command.
+
 ## Design note — LLM inference moves off the core (Plano Diretor, 2026-08-19)
 
 Not implemented in this repo yet — a Plano Diretor architecture revision

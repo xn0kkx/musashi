@@ -49,18 +49,28 @@ log = logging.getLogger("musashi-voice")
 class VoiceLoop:
     """One utterance in, one action and one spoken reply out.
 
-    `fallback` is the LLM seam (see intent.resolve_intent). It is None for the
-    whole of V1 and is threaded through here so wiring llama.cpp later touches
-    this constructor and nothing else."""
+    `fallback` is the single-shot LLM seam (see intent.resolve_intent): it
+    proposes ONE intent on a grammar miss. `assistant` is the separate,
+    multi-turn agent seam (see assistant.LlmAssistant): on a grammar miss with
+    no fallback proposal, it runs a tool-call loop and speaks free prose. Both
+    are None for the plain V1 loop; either can be wired without touching the
+    grammar or intent modules."""
 
     def __init__(self, cfg: dict, client: EffectorClient, grammar: Grammar,
-                 transcriber=None, speaker: Speaker | None = None, fallback=None):
+                 transcriber=None, speaker: Speaker | None = None, fallback=None,
+                 assistant=None):
         self.cfg = cfg
         self.client = client
         self.grammar = grammar
         self.transcriber = transcriber
         self.speaker = speaker or Speaker(cfg.get("tts"))
         self.fallback = fallback
+        self.assistant = assistant
+        # Spoken immediately when the assistant takes over a grammar miss, so a
+        # slow LLM turn (tens of seconds on CPU) is not dead silence — the user
+        # hears that Musashi caught the request and is working on it. Empty
+        # disables it.
+        self.llm_ack = str(cfg.get("llm", {}).get("ack", "")).strip()
         self.min_score = float(cfg.get("intent", {}).get("min_score", MIN_SCORE))
         self.locale = str(cfg.get("tts", {}).get("locale", "pt"))
         wake_cfg = cfg.get("wake", {})
@@ -74,6 +84,16 @@ class VoiceLoop:
                                     min_score=self.min_score, fallback=self.fallback)
 
         if intent is None:
+            # Grammar miss, no single-shot fallback proposal: hand the raw
+            # transcript to the agent if one is wired, which speaks its own
+            # reply. Only when there is no assistant do we fall back to the
+            # canned "não entendi".
+            if self.assistant is not None:
+                print("  → Musashi está pensando...")
+                if self.llm_ack:
+                    self.speaker.say(self.llm_ack)
+                self.assistant.handle(transcript, trace)
+                return
             reply = confirmation_text(None, locale=self.locale)
         else:
             with trace.stage("vsock"):
@@ -162,6 +182,35 @@ class VoiceLoop:
 
 
 # -- wiring ---------------------------------------------------------------
+def _make_speaker(cfg: dict):
+    """Piper (default) or Kokoro, selected by [tts].engine. Kokoro is the
+    natural-voice, sentence-streaming engine the LLM assistant wants; Piper
+    stays the default and the guest's canned-confirmation engine."""
+    engine = str(cfg.get("tts", {}).get("engine", "piper")).lower()
+    if engine == "kokoro":
+        from .tts_kokoro import KokoroSpeaker
+        return KokoroSpeaker(cfg.get("tts"))
+    return Speaker(cfg.get("tts"))
+
+
+def _make_assistant(cfg: dict, client: EffectorClient, tools: list[dict], speaker):
+    """Build the LLM agent from config, or None if [llm].enabled is false."""
+    llm_cfg = cfg.get("llm", {})
+    if not llm_cfg.get("enabled", False):
+        return None
+    from .assistant import LlmAssistant, OllamaClient
+    from .webtools import WebTools
+    web_cfg = cfg.get("web", {})
+    web = WebTools(web_cfg) if web_cfg.get("enabled", True) else None
+    return LlmAssistant(
+        OllamaClient(llm_cfg), client, tools, speaker,
+        web_tools=web,
+        system_prompt=llm_cfg.get("system_prompt"),
+        max_turns=int(llm_cfg.get("max_turns", 6)),
+        locale=str(cfg.get("tts", {}).get("locale", "pt")),
+    )
+
+
 def _setup_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -197,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list-tools", action="store_true",
                         help="print the guest's live tool table and the grammar built from it")
     parser.add_argument("--no-tts", action="store_true", help="print replies instead of speaking")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="disable the LLM assistant even if [llm].enabled "
+                             "is set (grammar-only, canned replies)")
     parser.add_argument("--devices", action="store_true", help="list audio devices and exit")
     parser.add_argument("--wake", action="store_true",
                         help="always-on capture, activated by the wake word "
@@ -252,7 +304,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [{p.locale}] {p.text:<32} -> {p.tool} {p.arg_dict}")
         return 0
 
-    loop = VoiceLoop(cfg, client, grammar)
+    speaker = _make_speaker(cfg)
+    assistant = None if args.no_llm else _make_assistant(cfg, client, tools, speaker)
+    if assistant is not None:
+        log.info("LLM assistant enabled (model %s)", assistant.ollama.model)
+        # Warm the model NOW, off-thread, so it loads while Whisper loads below
+        # and the first spoken query hits a resident model instead of eating
+        # the cold-start cost (~24s for the 30b MoE) live.
+        print("pré-aquecendo o modelo LLM em segundo plano...")
+        threading.Thread(target=assistant.warmup, name="llm-warmup",
+                         daemon=True).start()
+    loop = VoiceLoop(cfg, client, grammar, speaker=speaker, assistant=assistant)
 
     # Text mode: the whole intent -> vsock -> TTS path, no microphone, no GPU.
     if args.text:

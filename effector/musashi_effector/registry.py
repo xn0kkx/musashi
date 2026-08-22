@@ -26,6 +26,7 @@ import logging
 from musashi_gestures.intents import Arg, Registry, ToolClass
 
 from .apps import AppManager
+from .shell import Shell
 
 log = logging.getLogger("musashi-effector.registry")
 
@@ -121,4 +122,21 @@ def build_registry(cfg: dict, gate=None) -> tuple[Registry, AppManager, UiEffect
         reg.describe,
         doc="List the tools this daemon exposes, with their schemas.",
     )
+
+    # shell.exec is off unless the profile explicitly turns it on. `command` is
+    # a free-form Arg (no `choices`), so the V1 grammar skips it — only the LLM
+    # ever proposes it — and EFFECT + destructive=True routes it through the
+    # Registry.gate() where V2's confirmation / prefix-allowlist guard-rails
+    # will live. See shell.py for the full trade-off. HOOK(guard-rails S7-S10).
+    if cfg.get("shell", {}).get("enabled", False):
+        shell = Shell(cfg.get("shell"))
+        reg.register(
+            "shell.exec", ToolClass.EFFECT,
+            {"command": Arg(str)},
+            shell.exec_,
+            doc="Run a shell command and return {rc, stdout, stderr}.",
+            destructive=True,
+        )
+        log.warning("shell.exec ENABLED — this profile exposes an unrestricted shell")
+
     return reg, apps, ui

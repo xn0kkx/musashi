@@ -54,12 +54,62 @@ locales = ["pt", "en"]
 
 [tts]
 enabled = true
+# Which synthesis engine speaks. "piper" (default) is the small, fast, canned-
+# confirmation voice baked into the guest. "kokoro" is the natural,
+# sentence-streaming voice the host uses for the LLM assistant's prose — it
+# needs the [llm] extra (pip install 'voice/[llm]') and espeak-ng on the system.
+engine = "piper"
 # Absolute path to a Piper voice, e.g.
 #   ~/.local/share/piper/pt_BR-faber-medium.onnx
 # The matching .onnx.json must sit next to it. See voice/README.md for where
-# to download it; nothing is fetched automatically.
+# to download it; nothing is fetched automatically. (engine = "piper" only.)
 model = ""
 locale = "pt"
+# Kokoro settings (engine = "kokoro" only), backed by kokoro-onnx. pf_dora is a
+# Brazilian female voice; pm_alex / pm_santa are male. lang is an espeak code.
+# The two model files are downloaded separately (see docs/host-dev/voice.toml).
+kokoro_voice = "pf_dora"
+kokoro_lang = "pt-br"
+kokoro_speed = 1.0
+kokoro_model = "/opt/musashi/kokoro/kokoro-v1.0.onnx"
+kokoro_voices = "/opt/musashi/kokoro/voices-v1.0.bin"
+
+[llm]
+# The local uncensored assistant reached on a grammar miss. OFF by default so
+# the guest and a bare host checkout behave exactly as before; the host test
+# profile (~/.config/musashi/voice.toml) sets enabled = true. Needs Ollama
+# running the model below. think = false drops the reasoning block for voice
+# latency; keep_alive keeps the MoE resident between turns.
+enabled = false
+base_url = "http://127.0.0.1:11434"
+# 8b is the sweet spot on a 4GB GPU: mostly GPU-resident, ~6s/turn warm, and
+# reliable at tool use with the fixes here (cwd grounding, text tool-call
+# rescue). 30b-a3b is more capable but mostly CPU here (~13-45s). 4b is fastest
+# but flaky on multi-step tool use.
+model = "huihui_ai/qwen3-abliterated:8b"
+keep_alive = "30m"
+num_ctx = 8192
+think = false
+max_turns = 6
+# Low, because this agent's main job is running the right command — determinism
+# beats variety. Raise toward 0.7 for chattier, less predictable replies.
+temperature = 0.2
+timeout_s = 120.0
+# Spoken the instant the assistant takes over a grammar miss, so a slow first
+# turn is not dead silence. Empty ("") disables it. Kept very short.
+ack = "só um segundo"
+# HOOK(guard-rails S7-S10): the persona / refusal policy is just this string
+# today, deliberately minimal. Real guard-rails are a later layer and do not
+# change this architecture.
+system_prompt = "Você é Musashi, um assistente de voz direto em português do Brasil. Você controla este computador e tem acesso total ao terminal pela ferramenta shell_exec e à internet por web_search e web_fetch. Sempre que uma pergunta puder ser respondida rodando um comando (versão do kernel, usuário atual, arquivos, processos, data), USE o shell_exec em vez de dizer que não consegue. Depois de obter o resultado, responda de forma curta e natural, como numa conversa falada."
+
+[web]
+# web.search / web.fetch — QUERY (no side effects), so they run in-process, not
+# through the effector. Needs the [llm] extra (ddgs, requests, trafilatura).
+enabled = true
+max_results = 5
+fetch_max_chars = 4000
+timeout_s = 10.0
 
 [wake]
 # Only `python -m musashi_voice --wake` (what musashi-voice.service runs)

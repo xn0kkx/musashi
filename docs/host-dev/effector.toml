@@ -1,0 +1,18 @@
+# Host dev profile for musashi-effector — layered with:
+#   python -m musashi_effector --unix /tmp/eff.sock --config docs/host-dev/effector.toml
+#
+# Enables shell.exec (an unrestricted terminal capability for the LLM agent) on
+# the host WITHOUT writing into /etc/musashi. Never ship this into the guest.
+
+[shell]
+enabled = true
+timeout_s = 30.0
+
+[apps]
+# Host .desktop ids the LLM may launch/close. `ls /usr/share/applications` for
+# the real ids on this machine; these are examples.
+allow = [
+    "firefox.desktop",
+    "org.gnome.Calculator.desktop",
+    "foot.desktop",
+]

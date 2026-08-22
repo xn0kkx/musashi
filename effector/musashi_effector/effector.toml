@@ -28,3 +28,12 @@ allow = [
     "foot.desktop",
     "org.gnome.Calculator.desktop",
 ]
+
+[shell]
+# shell.exec — an unrestricted "run this in the shell" capability for the local
+# LLM agent. OFF by default: the guest image and any production profile must
+# never expose it. The host test profile (~/.config/musashi/effector.toml)
+# sets enabled = true. Registered as EFFECT + destructive=True, so V2's
+# confirmation gate (Registry.gate) can demand a second factor before it runs.
+enabled = false
+timeout_s = 30.0

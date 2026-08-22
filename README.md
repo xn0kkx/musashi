@@ -13,19 +13,24 @@ classifier — is designed but not yet built; see [Status](#status).
 
 ## Status
 
-The guest image, gesture input pipeline, intent/effector layer, and a voice
-MVP are implemented and validated (see [ROADMAP.md](ROADMAP.md) for the
-milestone log). This repo started as a gesture-controlled OS prototype (old
-name: `HaikuOS`); on 2026-08-19 the project's target was redefined into the
-mainframe described above, and the `haiku*` → `musashi*` rename was
-completed and validated. The voice MVP is a proof of concept, not the
-Plano Diretor's S3–S6 voice loop: `musashi-voice.service` now runs always-on,
-woken by the word "musashi" spotted via `faster-whisper` (no dedicated
-wake-word model, no gesture trigger, no AEC, no streaming, no web surface) —
-see [Voice](#voice) for the security trade-off this accepted. The
-core/inference-node/surface split, the privacy classifier, and
-the multi-LLM router (§0–§2 of the pivot) haven't started — what's here today
-is the pre-pivot base plus a voice proof of concept, both feeding into
+The guest image, gesture input pipeline, intent/effector layer, a voice
+MVP, and a first **host-side LLM voice assistant** are implemented and
+validated (see [ROADMAP.md](ROADMAP.md) for the milestone log). This repo
+started as a gesture-controlled OS prototype (old name: `HaikuOS`); on
+2026-08-19 the project's target was redefined into the mainframe described
+above, and the `haiku*` → `musashi*` rename was completed and validated. The
+voice MVP is a proof of concept, not the Plano Diretor's S3–S6 voice loop:
+`musashi-voice.service` now runs always-on, woken by the word "musashi" spotted
+via `faster-whisper` (no dedicated wake-word model, no gesture trigger, no AEC,
+no streaming, no web surface) — see [Voice](#voice) for the security trade-off
+this accepted. On top of it, a **prototype LLM assistant** (an uncensored local
+model with terminal and web access, spoken back with a natural Kokoro voice)
+now answers whatever the command grammar misses — a first taste of the Plano
+Diretor's S7–S10 multi-LLM router, validated **directly on the host with no
+VM**; see [Assistant](#assistant-llm). The core/inference-node/surface split
+and the privacy classifier (§0–§1 of the pivot) haven't started, and the
+assistant has **no guard-rails yet** — what's here today is the pre-pivot base,
+a voice proof of concept, and an agentic-LLM prototype, all feeding into
 `musashi-core`'s foundation.
 
 Full architecture and sprint plan: the Plano Diretor (Obsidian,
@@ -83,8 +88,8 @@ core/inference-node split exists.
 | Path | What it is |
 |---|---|
 | `gesture-engine/` | `musashi_gestures`: MediaPipe Hands → `/dev/uinput` touchscreen. `camera.py`/`hands.py` capture and landmark detection, `gestures.py`/`sequencer.py` the gesture state machine, `injector.py` the uinput device, `intents.py` the shared Intent/Registry contract (see below). |
-| `effector/` | `musashi_effector`: the capability daemon. `server.py` serves the intent protocol over `AF_VSOCK` **and** `AF_UNIX` simultaneously (one registry, one shared dispatch lock); `registry.py` is the only externally reachable tool table (`ui.tap`, `shell.swipe`, `app.launch`, `app.close`); `apps.py` launches `.desktop` apps via `Gio.DesktopAppInfo`, tracking PIDs so `app.close` is deterministic. |
-| `voice/` | `musashi_voice`: the voice loop — capture + Silero VAD, `faster-whisper` STT, a fuzzy-match grammar built at runtime from the effector's own tool table, Piper TTS. Runs either inside the guest (mic/speaker passed through by QEMU, effector reached over a local unix socket) or on a host (effector reached over `vsock`) — see [Voice](#voice). |
+| `effector/` | `musashi_effector`: the capability daemon. `server.py` serves the intent protocol over `AF_VSOCK` **and** `AF_UNIX` simultaneously (one registry, one shared dispatch lock); `registry.py` is the only externally reachable tool table (`ui.tap`, `shell.swipe`, `app.launch`, `app.close`, and — host profile only — `shell.exec`); `apps.py` launches `.desktop` apps via `Gio.DesktopAppInfo`, tracking PIDs so `app.close` is deterministic; `shell.py` runs a shell command for the LLM agent (off unless `[shell].enabled`). |
+| `voice/` | `musashi_voice`: the voice loop — capture + Silero VAD, `faster-whisper` STT, a fuzzy-match grammar built at runtime from the effector's own tool table, Piper TTS. Runs either inside the guest (mic/speaker passed through by QEMU, effector reached over a local unix socket) or on a host (effector reached over `vsock`) — see [Voice](#voice). Also holds the host LLM assistant: `assistant.py` (Ollama agentic tool-call loop), `webtools.py` (`web.search`/`web.fetch`), `tts_kokoro.py` (natural Kokoro voice) — see [Assistant](#assistant-llm). |
 | `build/` | Image build: `debootstrap` + chroot config + rootfs overlay. |
 | `docs/` | Technical decision history and gesture semantics. |
 
@@ -272,14 +277,75 @@ for real, and speech without the wake word ("abrir o terminal" on its own)
 was correctly discarded with no dispatch. Live validation with an actual
 human voice near the host microphone is still outstanding.
 
+## Assistant (LLM)
+
+A prototype of the Plano Diretor's S7–S10 multi-LLM router, running **directly
+on the host, no VM** — the fast way to iterate before the real
+core/inference-node split exists. When the command grammar misses (anything
+that is not one of the allowlisted `app.launch`/`shell.swipe` phrases), the raw
+transcript is handed to a local **uncensored** LLM that can drive the terminal
+and search the web, and answers in a natural spoken voice.
+
+This is a **second seam**, parallel to and independent of the single-shot
+`resolve_intent(..., fallback)` (which is left exactly as it was — an agentic,
+multi-turn loop does not fit its `Intent | None` shape). It lives in
+`voice/musashi_voice/assistant.py`:
+
+- **`OllamaClient`** streams `/api/chat`; **`LlmAssistant`** runs a multi-turn
+  tool-call loop. Its tool definitions are derived from the effector's live
+  `sys.tools` table **plus** the web tools — one source, never a divergent copy.
+- **The proposer never validates.** `shell.exec` and `app.*` are *proposed* to
+  `musashi-effector`, which owns the schema, the allowlist, and the class gate
+  and decides — the same contract gestures and the grammar use.
+  `web.search`/`web.fetch` (`webtools.py`) run in-process because QUERY has no
+  side effects to guard.
+- **Natural voice.** `tts_kokoro.py` speaks with Kokoro-82M (via `kokoro-onnx`,
+  Python-3.13-compatible), sentence-streamed so a long answer starts speaking
+  while the model is still generating. Selected with `[tts].engine = "kokoro"`;
+  Piper stays the default confirmation voice.
+
+Run it on the host — the effector (with `shell.exec` enabled) and the wake-word
+loop, one command:
+
+```sh
+sudo apt install espeak-ng                            # Kokoro's PT G2P
+ollama pull huihui_ai/qwen3-abliterated:8b            # the default model
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e gesture-engine/ -e effector/ -e 'voice/[audio,llm]'
+# Kokoro model files (kokoro-onnx, not the torch package):
+mkdir -p /opt/musashi/kokoro && cd /opt/musashi/kokoro
+B=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+curl -fLO $B/kokoro-v1.0.onnx && curl -fLO $B/voices-v1.0.bin && cd -
+
+./run-host.sh                                         # say "musashi, ..."
+./run-host.sh --text "musashi, qual a versão do kernel"   # no mic, one shot
+```
+
+Example host configs are in [`docs/host-dev/`](docs/host-dev/). The default
+model is `huihui_ai/qwen3-abliterated:8b` — on a 4 GB GPU it is the balance of
+speed (~6 s per warm turn, mostly GPU-resident) and reliable tool use; swap for
+`:30b-a3b` (more capable, ~13–45 s, mostly CPU) or `:4b` (fastest, flaky) in
+`~/.config/musashi/voice.toml`. The model is warmed at startup in parallel with
+the Whisper load, so the first spoken query does not pay the cold-start cost.
+
+**No guard-rails yet — this is deliberate and not safe to leave.** `shell.exec`
+is an unrestricted terminal, reachable by anything the wake word activates, with
+no second non-audio factor (Plano Diretor §2.7) and no confirmation on
+destructive actions. The architectural hooks are marked in place —
+`Registry.gate(intent, spec)` for a confirmation / prefix allowlist, and the
+`[llm].system_prompt` for a persona/refusal layer — but the policy behind them
+is future work. Keep this host profile off any machine where that matters.
+
 ## Layout
 
 - `build/` — image build scripts + rootfs overlay
 - `gesture-engine/` — the `musashi_gestures` Python package (MediaPipe → uinput)
 - `effector/` — the `musashi_effector` capability daemon
-- `voice/` — the `musashi_voice` package (STT/intent/TTS loop; runs in the
-  guest or on a host)
+- `voice/` — the `musashi_voice` package (STT/intent/TTS loop + host LLM
+  assistant; runs in the guest or on a host)
 - `run.sh` — boots the VM
+- `run-host.sh` — runs the LLM voice assistant on the host, no VM (see
+  [Assistant](#assistant-llm) and `docs/host-dev/`)
 - `out/` — generated artifacts (image, kernel, initrd); **not versioned**
   (`.gitignore`) — regenerate with `build/build-image.sh`
 - `logs/` — local boot/build logs; **not versioned**
@@ -303,3 +369,5 @@ and `/opt/musashi/piper/`, logs at `/tmp/gesture-engine.log` and
 - [voice/README.md](voice/README.md) — the voice loop in detail: both
   arrangements (guest-local and host-over-vsock), model config, install,
   and testing without a microphone.
+- [docs/host-dev/README.md](docs/host-dev/README.md) — running the LLM voice
+  assistant on the host (no VM): setup, model choice, and the safety caveat.

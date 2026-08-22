@@ -1,0 +1,40 @@
+# Host dev profile for musashi-voice — the natural-voice LLM assistant loop
+# running directly on the host (no VM). Copy the parts you want into
+# ~/.config/musashi/voice.toml (merged section-by-section over the packaged
+# defaults), or point at it explicitly via env if you script it.
+#
+# Prereqs on the host:
+#   sudo apt install espeak-ng
+#   ollama pull huihui_ai/qwen3-abliterated:30b-a3b
+#   pip install -e 'voice/[audio,llm]'      # sounddevice, faster-whisper, kokoro-onnx, ...
+#   # Kokoro model files (Python 3.13 uses kokoro-onnx, not the torch package):
+#   mkdir -p /opt/musashi/kokoro && cd /opt/musashi/kokoro
+#   B=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+#   curl -fLO $B/kokoro-v1.0.onnx && curl -fLO $B/voices-v1.0.bin
+
+[vsock]
+# Reach a host-side effector over its unix socket instead of a VM over vsock.
+unix_path = "/tmp/eff.sock"
+
+[stt]
+model = "large-v3-turbo"    # small if VRAM is tight next to other GPU users
+device = "cuda"             # the GTX 1650 runs Whisper; the LLM runs on CPU+RAM
+compute_type = "int8_float16"
+
+[tts]
+engine = "kokoro"           # natural, sentence-streaming voice (needs espeak-ng)
+kokoro_voice = "pf_dora"    # Brazilian female; pm_alex / pm_santa are male
+kokoro_lang = "pt-br"
+# kokoro_model / kokoro_voices default to /opt/musashi/kokoro/*; override here
+# if you put the files elsewhere.
+
+[llm]
+enabled = true
+# 8b: mostly fits the GTX 1650, ~6s/turn warm, reliable tool use. Swap for
+# :30b-a3b for max capability (slower, mostly CPU) or :4b for max speed (flaky).
+model = "huihui_ai/qwen3-abliterated:8b"
+think = false               # /no_think — big latency win
+temperature = 0.2           # low = reliable commands; raise for chattier replies
+
+[audio]
+input_device = ""           # "" = system default; or a sounddevice name, e.g. "ME6S"

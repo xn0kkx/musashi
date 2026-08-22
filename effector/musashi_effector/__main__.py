@@ -42,15 +42,21 @@ SYSTEM_CONFIG = "/etc/musashi/effector.toml"
 DEFAULT_LOG_FILE = "/tmp/musashi-effector.log"
 
 
-def load_config() -> dict:
+def load_config(extra_path: str | None = None) -> dict:
     data = importlib.resources.files("musashi_effector").joinpath("effector.toml").read_bytes()
     cfg = tomllib.loads(data.decode())
-    try:
-        with open(SYSTEM_CONFIG, "rb") as f:
-            for section, values in tomllib.load(f).items():
-                cfg.setdefault(section, {}).update(values)
-    except FileNotFoundError:
-        pass
+    # Packaged defaults, then the system file, then an optional explicit file
+    # (--config) that wins — the host dev profile that enables shell.exec
+    # without needing sudo to write into /etc/musashi.
+    for path in (SYSTEM_CONFIG, extra_path):
+        if not path:
+            continue
+        try:
+            with open(path, "rb") as f:
+                for section, values in tomllib.load(f).items():
+                    cfg.setdefault(section, {}).update(values)
+        except FileNotFoundError:
+            pass
     return cfg
 
 
@@ -80,6 +86,9 @@ def main() -> int:
                         help="override the local unix socket served alongside vsock")
     parser.add_argument("--no-unix", action="store_true",
                         help="serve vsock only, without the local unix socket")
+    parser.add_argument("--config", metavar="PATH", default=None,
+                        help="extra effector.toml layered on top of the system "
+                             "config (host dev profile: enables [shell] without sudo)")
     parser.add_argument("--vsock-port", type=int, default=None,
                         help="override the vsock port from config")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -88,7 +97,7 @@ def main() -> int:
     args = parser.parse_args()
 
     _setup_logging(args.verbose, args.log_file)
-    cfg = load_config()
+    cfg = load_config(args.config)
 
     registry, apps, ui = build_registry(cfg)
     log.info("tools: %s", registry.names())

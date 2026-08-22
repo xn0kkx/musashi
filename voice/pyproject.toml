@@ -39,6 +39,21 @@ audio = [
     "piper-tts>=1.2",
 ]
 
+# The host-side uncensored LLM assistant: Ollama over HTTP, Kokoro TTS, and
+# in-process web reads. Split out because the guest voice loop does not use any
+# of it and the core test suite must import assistant/webtools/tts_kokoro
+# without these present (every import inside them is lazy).
+llm = [
+    "requests>=2.31",
+    "ddgs>=6.0",
+    "trafilatura>=1.8",
+    # kokoro-onnx, NOT the torch `kokoro` package: the latter caps Python at
+    # <3.13, and both this host and the Debian 13 guest run 3.13. Same 82M
+    # model via onnxruntime, no torch. Model files are downloaded separately
+    # (see docs/host-dev/voice.toml) and pointed at by [tts].kokoro_model.
+    "kokoro-onnx>=0.4",
+]
+
 [project.scripts]
 musashi-voice = "musashi_voice.__main__:main"
 
